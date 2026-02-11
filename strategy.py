@@ -22,7 +22,6 @@ import numpy as np
 from datetime import datetime, timezone
 import logging
 import config
-from ml_classifier import SignalClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,6 @@ class Strategy:
     def __init__(self):
         self.name = "XAUUSD Trend Following + Liquidity Sweep + Fibonacci OTE v2.0"
         self.fractal_lookback = 5  # Velas a cada lado para detectar fractales
-        self.classifier = SignalClassifier()
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calcular todos los indicadores tecnicos."""
@@ -552,29 +550,6 @@ class Strategy:
 
         # Obtener ATR levels
         atr_levels = self.get_dynamic_sl_tp(df, best_signal)
-
-        # Filtro ML: verificar con el clasificador si la senal es de calidad
-        ml_enabled = getattr(config, 'ML_FILTER_ENABLED', False)
-        if ml_enabled and self.classifier.is_ready:
-            fib_data = self._check_fibonacci_ote(df, best_signal)
-            fib_level_num = fib_data.get("fib_level") if fib_data.get("in_ote") else 0.0
-
-            features = self.classifier.extract_features(
-                df, best_signal, best_met, fib_level_num
-            )
-            ml_result = self.classifier.predict(features)
-
-            if not ml_result["approved"]:
-                logger.info(
-                    f"Senal {best_signal} RECHAZADA por ML "
-                    f"(prob={ml_result['probability']:.3f})"
-                )
-                return no_signal
-
-            logger.info(
-                f"Senal {best_signal} APROBADA por ML "
-                f"(prob={ml_result['probability']:.3f})"
-            )
 
         conf_label = "MAXIMA" if best_met == 5 else "ALTA" if best_met == 4 else "MODERADA"
         logger.info(

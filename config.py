@@ -101,9 +101,3 @@ LOG_LEVEL = "INFO"
 # AGENTE
 # ============================================
 CHECK_INTERVAL_SECONDS = 60      # Cada cuánto revisa el mercado (60s = cada minuto)
-
-# ============================================
-# CLASIFICADOR ML
-# ============================================
-ML_FILTER_ENABLED = True          # Activar filtro ML para senales (requiere modelo entrenado)
-ML_THRESHOLD = 0.5                # Probabilidad minima para aprobar senal (se sobreescribe al entrenar)
