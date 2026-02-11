@@ -406,29 +406,47 @@ class Strategy:
 
     def check_signal(self, df: pd.DataFrame) -> dict:
         """
-        Verificar si hay senal de trading.
+        Verificar si hay senal de trading con sistema escalonado.
 
-        Confluencia requerida (5/5):
-        1. Tendencia (EMA 21 vs EMA 50)
+        Confluencias evaluadas (5):
+        1. Tendencia (EMA 21 vs EMA 50) - OBLIGATORIA
         2. RSI en zona neutra (35-65)
         3. Pullback a EMA 21 (multi-vela)
         4. Liquidity sweep estructural confirma direccion
         5. Precio en zona OTE Fibonacci (61.8% - 78.6%) con validacion temporal
 
-        Filtro adicional: Volatilidad (ATR)
+        Modo escalonado (TIERED_RISK_ENABLED=True):
+            5/5 confluencias -> riesgo 0.75% (confianza maxima)
+            4/5 confluencias -> riesgo 0.50% (confianza alta)
+            3/5 confluencias -> riesgo 0.25% (confianza moderada)
+            La tendencia siempre debe cumplirse.
+
+        Modo clasico (TIERED_RISK_ENABLED=False):
+            Solo opera con 5/5 confluencias al riesgo fijo.
 
         Returns:
-            dict con "signal" ("BUY", "SELL", "NONE") y "atr_levels" (opcional)
+            dict con:
+                "signal": "BUY", "SELL", o "NONE"
+                "atr_levels": dict con SL/TP dinamicos o None
+                "confluences_met": int (cuantas confluencias se cumplieron)
+                "confluences_detail": dict detalle de cada confluencia
+                "risk_percent": float riesgo asignado segun confluencias
         """
+        no_signal = {
+            "signal": "NONE", "atr_levels": None,
+            "confluences_met": 0, "confluences_detail": {},
+            "risk_percent": 0
+        }
+
         if len(df) < config.EMA_SLOW + 10:
             logger.warning("No hay suficientes velas para calcular indicadores")
-            return {"signal": "NONE", "atr_levels": None}
+            return no_signal
 
         df = self.calculate_indicators(df)
 
         # Filtro de volatilidad
         if not self.check_volatility_filter(df):
-            return {"signal": "NONE", "atr_levels": None}
+            return no_signal
 
         # Ultima vela cerrada
         last = df.iloc[-2]
@@ -439,21 +457,22 @@ class Strategy:
         # Log de analisis general
         atr_value = last['atr'] if not pd.isna(last['atr']) else 0
         logger.info(
-            f"📊 Analisis: Tendencia={current_trend} | RSI={current_rsi:.1f} | "
+            f"Analisis: Tendencia={current_trend} | RSI={current_rsi:.1f} | "
             f"EMA21={last['ema_fast']:.2f} | EMA50={last['ema_slow']:.2f} | "
             f"Close={last['close']:.2f} | ATR={atr_value:.2f}"
         )
         logger.info(
-            f"📊 Liquidity: Sweep High={last['sweep_high']} | "
+            f"Liquidity: Sweep High={last['sweep_high']} | "
             f"Sweep Low={last['sweep_low']} | "
             f"Pullback Buy={last['pullback_buy']} | "
             f"Pullback Sell={last['pullback_sell']}"
         )
 
-        # Obtener niveles ATR dinamicos
-        atr_levels = self.get_dynamic_sl_tp(df, "BUY")
+        tiered = getattr(config, 'TIERED_RISK_ENABLED', False)
+        min_conf = getattr(config, 'MIN_CONFLUENCES', 5)
+        risk_map = getattr(config, 'RISK_BY_CONFLUENCES', {5: config.RISK_PERCENT})
 
-        # ========== SENAL DE COMPRA (5 confluencias) ==========
+        # ========== EVALUAR COMPRA ==========
         fib_buy = self._check_fibonacci_ote(df, "BUY")
 
         buy_conditions = {
@@ -465,14 +484,9 @@ class Strategy:
         }
 
         buy_met = sum(buy_conditions.values())
-        logger.info(f"🟢 Compra ({buy_met}/5): {buy_conditions}")
+        logger.info(f"Compra ({buy_met}/5): {buy_conditions}")
 
-        if all(buy_conditions.values()):
-            logger.info("🟢 SENAL DE COMPRA - 5/5 confluencias alineadas")
-            atr_levels = self.get_dynamic_sl_tp(df, "BUY")
-            return {"signal": "BUY", "atr_levels": atr_levels}
-
-        # ========== SENAL DE VENTA (5 confluencias) ==========
+        # ========== EVALUAR VENTA ==========
         fib_sell = self._check_fibonacci_ote(df, "SELL")
 
         sell_conditions = {
@@ -484,19 +498,73 @@ class Strategy:
         }
 
         sell_met = sum(sell_conditions.values())
-        logger.info(f"🔴 Venta ({sell_met}/5): {sell_conditions}")
+        logger.info(f"Venta ({sell_met}/5): {sell_conditions}")
 
-        if all(sell_conditions.values()):
-            logger.info("🔴 SENAL DE VENTA - 5/5 confluencias alineadas")
-            atr_levels = self.get_dynamic_sl_tp(df, "SELL")
-            return {"signal": "SELL", "atr_levels": atr_levels}
+        # ========== DETERMINAR MEJOR SENAL ==========
+        # Priorizar la direccion con mas confluencias
+        best_signal = "NONE"
+        best_met = 0
+        best_conditions = {}
 
-        # Log de confluencias parciales
-        if buy_met >= 4 or sell_met >= 4:
-            logger.info(f"⚠️ Casi senal: Compra {buy_met}/5, Venta {sell_met}/5")
+        if buy_conditions["tendencia"] and buy_met >= sell_met:
+            best_signal = "BUY"
+            best_met = buy_met
+            best_conditions = buy_conditions
+        elif sell_conditions["tendencia"] and sell_met > buy_met:
+            best_signal = "SELL"
+            best_met = sell_met
+            best_conditions = sell_conditions
+        elif buy_conditions["tendencia"] and buy_met >= min_conf:
+            best_signal = "BUY"
+            best_met = buy_met
+            best_conditions = buy_conditions
+        elif sell_conditions["tendencia"] and sell_met >= min_conf:
+            best_signal = "SELL"
+            best_met = sell_met
+            best_conditions = sell_conditions
 
-        logger.info("Sin senal")
-        return {"signal": "NONE", "atr_levels": None}
+        # La tendencia es OBLIGATORIA
+        if not best_conditions.get("tendencia", False):
+            logger.info("Sin senal - tendencia no confirmada")
+            return no_signal
+
+        # Verificar minimo de confluencias
+        if tiered:
+            required = min_conf
+        else:
+            required = 5  # Modo clasico: solo 5/5
+
+        if best_met < required:
+            if best_met >= 3:
+                logger.info(f"Senal {best_signal} descartada: {best_met}/5 confluencias "
+                            f"(minimo requerido: {required})")
+            else:
+                logger.info("Sin senal")
+            return no_signal
+
+        # Calcular riesgo segun confluencias
+        risk_percent = risk_map.get(best_met, 0)
+        if risk_percent <= 0:
+            logger.info(f"Sin riesgo asignado para {best_met} confluencias")
+            return no_signal
+
+        # Obtener ATR levels
+        atr_levels = self.get_dynamic_sl_tp(df, best_signal)
+
+        conf_label = "MAXIMA" if best_met == 5 else "ALTA" if best_met == 4 else "MODERADA"
+        logger.info(
+            f"SENAL DE {'COMPRA' if best_signal == 'BUY' else 'VENTA'} - "
+            f"{best_met}/5 confluencias | Confianza {conf_label} | "
+            f"Riesgo={risk_percent}%"
+        )
+
+        return {
+            "signal": best_signal,
+            "atr_levels": atr_levels,
+            "confluences_met": best_met,
+            "confluences_detail": best_conditions,
+            "risk_percent": risk_percent,
+        }
 
     def is_session_active(self) -> bool:
         """Verificar si estamos en sesion de Londres o New York (UTC)."""

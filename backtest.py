@@ -96,6 +96,8 @@ class BacktestEngine:
 
         signal = result["signal"]
         atr_levels = result["atr_levels"]
+        confluences_met = result.get("confluences_met", 5)
+        risk_percent = result.get("risk_percent", config.RISK_PERCENT)
 
         if signal == "NONE":
             return
@@ -117,8 +119,8 @@ class BacktestEngine:
             sl = entry_price + sl_distance
             tp = entry_price - tp_distance
 
-        # Calcular lotaje
-        risk_amount = self.balance * (config.RISK_PERCENT / 100)
+        # Calcular lotaje con riesgo escalonado
+        risk_amount = self.balance * (risk_percent / 100)
         contract_size = 100  # XAUUSD estandar
         value_per_lot = sl_distance * contract_size
         lot_size = risk_amount / value_per_lot if value_per_lot > 0 else 0.01
@@ -133,6 +135,8 @@ class BacktestEngine:
             "entry_time": current_bar['time'],
             "sl_distance": sl_distance,
             "be_activated": False,
+            "confluences": confluences_met,
+            "risk_percent": risk_percent,
         }
 
     def _manage_trade(self, bar: pd.Series):
@@ -199,6 +203,8 @@ class BacktestEngine:
             "pnl_pips": round(pnl_per_unit / 0.1, 1),  # pips para XAUUSD
             "reason": reason,
             "be_activated": trade["be_activated"],
+            "confluences": trade.get("confluences", 5),
+            "risk_percent": trade.get("risk_percent", config.RISK_PERCENT),
         }
 
         self.trades.append(trade_record)
@@ -269,6 +275,23 @@ class BacktestEngine:
         sl_trades = len([t for t in self.trades if t["reason"] == "SL"])
         be_activated = len([t for t in self.trades if t["be_activated"]])
 
+        # Desglose por confluencias
+        by_confluences = {}
+        for conf_level in [3, 4, 5]:
+            conf_trades = [t for t in self.trades if t.get("confluences", 5) == conf_level]
+            if conf_trades:
+                conf_wins = [t for t in conf_trades if t["pnl"] > 0]
+                conf_pnl = sum(t["pnl"] for t in conf_trades)
+                conf_wr = len(conf_wins) / len(conf_trades) * 100
+                by_confluences[conf_level] = {
+                    "trades": len(conf_trades),
+                    "wins": len(conf_wins),
+                    "losses": len(conf_trades) - len(conf_wins),
+                    "win_rate": round(conf_wr, 1),
+                    "pnl": round(conf_pnl, 2),
+                    "risk_percent": conf_trades[0].get("risk_percent", 0),
+                }
+
         return {
             "total_trades": len(self.trades),
             "wins": len(wins),
@@ -290,6 +313,7 @@ class BacktestEngine:
             "sl_closures": sl_trades,
             "be_activations": be_activated,
             "final_balance": round(self.balance, 2),
+            "by_confluences": by_confluences,
         }
 
     def _print_report(self, metrics: dict):
@@ -328,6 +352,19 @@ class BacktestEngine:
         print(f"  Por Take Profit:   {metrics['tp_closures']}")
         print(f"  Por Stop Loss:     {metrics['sl_closures']}")
         print(f"  BE activado:       {metrics['be_activations']} trades")
+
+        # Desglose por confluencias
+        by_conf = metrics.get("by_confluences", {})
+        if by_conf:
+            print(f"\n--- DESGLOSE POR CONFLUENCIAS ---")
+            for level in sorted(by_conf.keys(), reverse=True):
+                data = by_conf[level]
+                label = {5: "MAXIMA", 4: "ALTA", 3: "MODERADA"}.get(level, str(level))
+                print(f"  {level}/5 ({label}, {data['risk_percent']}%): "
+                      f"{data['trades']} trades | "
+                      f"W:{data['wins']} L:{data['losses']} | "
+                      f"WR:{data['win_rate']}% | "
+                      f"PnL: ${data['pnl']}")
 
         print("=" * 60)
 

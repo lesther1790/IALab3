@@ -5,17 +5,32 @@ Estrategia basada en Trend Following + Smart Money Concepts + Fibonacci OTE con 
 
 ## Estrategia
 
-### Confluencias Requeridas (5/5)
+### Confluencias Evaluadas (5)
 
-El agente **solo abre trade cuando las 5 confluencias se alinean simultaneamente**:
+El agente evalua 5 confluencias y ajusta el capital segun cuantas se cumplan:
 
-| # | Confluencia | Descripcion |
-|---|-------------|-------------|
-| 1 | **Tendencia** | EMA 21 > EMA 50 (alcista) / EMA 21 < EMA 50 (bajista) |
-| 2 | **RSI Neutro** | RSI 14 entre 35-65 (sin sobrecompra/sobreventa) |
-| 3 | **Pullback Multi-Vela** | Precio retrocede a EMA 21 en las ultimas 5 velas y cierra a favor de la tendencia |
-| 4 | **Liquidity Sweep Estructural** | Barrido del minimo/maximo de las ultimas 10 velas con cierre de rechazo |
-| 5 | **Fibonacci OTE** | Precio en zona Optimal Trade Entry (61.8% - 78.6%) con validacion temporal de fractales |
+| # | Confluencia | Descripcion | Obligatoria |
+|---|-------------|-------------|:-----------:|
+| 1 | **Tendencia** | EMA 21 > EMA 50 (alcista) / EMA 21 < EMA 50 (bajista) | SI |
+| 2 | **RSI Neutro** | RSI 14 entre 35-65 (sin sobrecompra/sobreventa) | No |
+| 3 | **Pullback Multi-Vela** | Precio retrocede a EMA 21 en las ultimas 5 velas y cierra a favor | No |
+| 4 | **Liquidity Sweep Estructural** | Barrido del min/max de las ultimas 10 velas con cierre de rechazo | No |
+| 5 | **Fibonacci OTE** | Precio en zona OTE (61.8% - 78.6%) con validacion temporal de fractales | No |
+
+### Riesgo Escalonado por Confluencias
+
+El sistema ajusta automaticamente el capital arriesgado segun el nivel de confianza de la senal:
+
+| Confluencias | Confianza | Riesgo | Ejemplo ($10,000) |
+|:------------:|-----------|:------:|:------------------:|
+| **5/5** | Maxima | 0.75% | $75 por trade |
+| **4/5** | Alta | 0.50% | $50 por trade |
+| **3/5** | Moderada | 0.25% | $25 por trade |
+| **2/5 o menos** | Insuficiente | No opera | - |
+
+> La **tendencia (EMA)** es siempre obligatoria. No se opera contra tendencia bajo ninguna circunstancia.
+> Con 3/5 confluencias se necesita: tendencia + 2 de las otras 4.
+> El modo escalonado se puede desactivar con `TIERED_RISK_ENABLED = False` para volver al modo clasico (solo 5/5).
 
 ### Filtros Adicionales
 
@@ -30,6 +45,7 @@ El agente **solo abre trade cuando las 5 confluencias se alinean simultaneamente
 
 | Aspecto | v1.0 | v2.0 |
 |---------|------|------|
+| Confluencias | Solo 5/5 o nada | Escalonado 3/5, 4/5, 5/5 con riesgo variable |
 | SL/TP | Fijo 20/60 pips | Dinamico ATR (1.5x / 4.5x) |
 | RSI | 40-60 (restrictivo) | 35-65 (adaptado a tendencia) |
 | Liquidity Sweep | 1 vela anterior | 10 velas estructurales |
@@ -39,7 +55,7 @@ El agente **solo abre trade cuando las 5 confluencias se alinean simultaneamente
 | Margen | Sin validacion | Valida margen libre antes de operar |
 | Break Even | Entrada + 1 pip | Entrada + spread + 1 pip |
 | RSI calc | Division por cero posible | Protegido con replace(0, NaN) |
-| Backtesting | No disponible | Modulo completo incluido |
+| Backtesting | No disponible | Modulo completo con desglose por confluencia |
 
 ### Parametros de Riesgo
 
@@ -47,22 +63,23 @@ El agente **solo abre trade cuando las 5 confluencias se alinean simultaneamente
 |-----------|-------|
 | Par | XAUUSD+ |
 | Timeframe | H1 |
-| Riesgo por trade | 0.75% del balance |
+| Riesgo por trade | 0.25% - 0.75% (segun confluencias) |
 | Stop Loss | ATR(14) x 1.5 (dinamico) |
 | Take Profit | ATR(14) x 4.5 (dinamico) |
 | Ratio R:R | 1:3 |
 | Break Even | Se activa a +15 pips (con buffer de spread) |
 | Trailing Stop | Se activa a +40 pips, trail de 15 pips |
-| Max trades simultaneos | 2 |
+| Max trades simultaneos | 3 |
 | Sesion | Londres/NY (0:00-17:00 UTC) |
 | Margen minimo | 1.5x margen requerido |
 
 ### Frecuencia Esperada
 
-Con 5 confluencias obligatorias + filtro de volatilidad, el agente es altamente selectivo:
-- **Estimado: 2-5 trades por semana** en condiciones normales
-- Semanas sin estructura clara pueden tener 0 trades
-- Prioriza calidad sobre cantidad
+Con el sistema escalonado, el agente genera mas oportunidades sin aumentar el riesgo total:
+- **5/5 confluencias:** 1-2 trades por semana (capital completo)
+- **4/5 confluencias:** 3-5 trades por semana (capital reducido)
+- **3/5 confluencias:** 5-8 trades por semana (capital minimo)
+- La exposicion total se mantiene controlada gracias al riesgo proporcional
 
 ## Backtesting
 
@@ -241,20 +258,41 @@ LIQUIDITY_LOOKBACK = 10          # Velas para detectar niveles de liquidez
 PULLBACK_LOOKBACK = 5            # Velas para confirmar pullback
 ```
 
+### Riesgo Escalonado
+```python
+TIERED_RISK_ENABLED = True        # Activar (False = solo 5/5 como v1.0)
+MIN_CONFLUENCES = 3               # Minimo de confluencias para operar
+RISK_BY_CONFLUENCES = {
+    5: 0.75,                       # Confianza maxima
+    4: 0.50,                       # Confianza alta
+    3: 0.25,                       # Confianza moderada
+}
+```
+
 ## Ejemplo de Log v2.0
 
+### Senal con 5/5 confluencias (riesgo completo)
 ```
-2025-01-15 10:00:01 [INFO] Analisis: Tendencia=BULLISH | RSI=48.3 | EMA21=2650.20 | EMA50=2645.80 | Close=2650.50 | ATR=8.45
-2025-01-15 10:00:01 [INFO] Volatilidad OK: ATR=8.45 | ATR_SMA50=7.20 | Ratio=1.17
-2025-01-15 10:00:01 [INFO] Liquidity: Sweep High=False | Sweep Low=True | Pullback Buy=True | Pullback Sell=False
-2025-01-15 10:00:01 [INFO] Fibonacci: Swing H=2665.00 (idx=85) | Swing L=2630.00 (idx=72) | OTE Zone=[2643.37 - 2637.49] | Precio=2640.50 | En OTE=OK
-2025-01-15 10:00:01 [INFO] ATR Dinamico: ATR=8.45 | SL=12.68 (1.5x) | TP=38.03 (4.5x) | Ratio=1:3.0
 2025-01-15 10:00:01 [INFO] Compra (5/5): {'tendencia': True, 'rsi': True, 'pullback': True, 'liquidity': True, 'fibonacci_ote': True}
-2025-01-15 10:00:01 [INFO] SENAL DE COMPRA - 5/5 confluencias alineadas
-2025-01-15 10:00:01 [INFO] Margen OK: Libre=$8500.00 | Minimo=$795.00
+2025-01-15 10:00:01 [INFO] SENAL DE COMPRA - 5/5 confluencias | Confianza MAXIMA | Riesgo=0.75%
 2025-01-15 10:00:02 [INFO] Calculo de lote: Balance=$10000 | Riesgo=0.75% = $75.00 | SL=ATR dist=12.68 | Lote=0.06
-2025-01-15 10:00:02 [INFO] SL/TP [ATR]: BUY @ 2650.50 | SL=2637.82 (dist=12.68) | TP=2688.53 (dist=38.03)
-2025-01-15 10:00:02 [INFO] Trade ejecutado: BUY 0.06 XAUUSD @ 2650.50 | SL: 2637.82 | TP: 2688.53
+2025-01-15 10:00:02 [INFO] Trade ejecutado (5/5, 0.75%): BUY 0.06 XAUUSD @ 2650.50 | SL: 2637.82 | TP: 2688.53
+```
+
+### Senal con 4/5 confluencias (riesgo reducido)
+```
+2025-01-15 14:00:01 [INFO] Compra (4/5): {'tendencia': True, 'rsi': True, 'pullback': True, 'liquidity': False, 'fibonacci_ote': True}
+2025-01-15 14:00:01 [INFO] SENAL DE COMPRA - 4/5 confluencias | Confianza ALTA | Riesgo=0.50%
+2025-01-15 14:00:02 [INFO] Calculo de lote: Balance=$10000 | Riesgo=0.50% = $50.00 | SL=ATR dist=11.20 | Lote=0.04
+2025-01-15 14:00:02 [INFO] Trade ejecutado (4/5, 0.5%): BUY 0.04 XAUUSD @ 2655.30 | SL: 2644.10 | TP: 2705.70
+```
+
+### Senal con 3/5 confluencias (riesgo minimo)
+```
+2025-01-16 09:00:01 [INFO] Venta (3/5): {'tendencia': True, 'rsi': False, 'pullback': True, 'liquidity': True, 'fibonacci_ote': False}
+2025-01-16 09:00:01 [INFO] SENAL DE VENTA - 3/5 confluencias | Confianza MODERADA | Riesgo=0.25%
+2025-01-16 09:00:02 [INFO] Calculo de lote: Balance=$10000 | Riesgo=0.25% = $25.00 | SL=ATR dist=9.85 | Lote=0.03
+2025-01-16 09:00:02 [INFO] Trade ejecutado (3/5, 0.25%): SELL 0.03 XAUUSD @ 2648.00 | SL: 2657.85 | TP: 2603.68
 ```
 
 ## Disclaimer

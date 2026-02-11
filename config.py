@@ -22,11 +22,27 @@ TIMEFRAME = "H1"                  # Temporalidad principal
 # GESTIÓN DE RIESGO
 # ============================================
 
-RISK_PERCENT = 0.75               # % del capital por operación
+RISK_PERCENT = 0.75               # % del capital con 5/5 confluencias (riesgo maximo)
 STOP_LOSS_PIPS = 20              # Stop Loss en pips (fallback si ATR no disponible)
 TAKE_PROFIT_PIPS = 60            # Take Profit en pips (fallback si ATR no disponible)
-MAX_OPEN_TRADES = 2              # Máximo de trades abiertos simultáneamente
+MAX_OPEN_TRADES = 3              # Maximo de trades abiertos simultaneamente
 MARGIN_SAFETY_FACTOR = 1.5       # Factor de seguridad para margen libre (1.5x margen requerido)
+
+# ============================================
+# RIESGO ESCALONADO POR CONFLUENCIAS
+# ============================================
+# El riesgo se ajusta segun cuantas confluencias se cumplen.
+# Confluencias: tendencia, rsi, pullback, liquidity, fibonacci_ote
+# La tendencia es OBLIGATORIA siempre (no se opera contra tendencia).
+TIERED_RISK_ENABLED = True        # Activar sistema escalonado (False = solo 5/5 como antes)
+MIN_CONFLUENCES = 3               # Minimo de confluencias para abrir trade
+RISK_BY_CONFLUENCES = {
+    5: 0.75,                       # 5/5 confluencias -> 0.75% (confianza maxima)
+    4: 0.50,                       # 4/5 confluencias -> 0.50% (confianza alta)
+    3: 0.25,                       # 3/5 confluencias -> 0.25% (confianza moderada)
+}
+# Nota: La tendencia (EMA) siempre debe cumplirse. Con 3/5 se necesitan
+# tendencia + 2 de las otras 4 confluencias.
 
 # ============================================
 # BREAK EVEN Y TRAILING STOP
