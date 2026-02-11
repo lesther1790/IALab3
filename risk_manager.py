@@ -1,9 +1,11 @@
 """
-Risk Manager - Gestión de Riesgo
-=================================
-- Cálculo de lotaje basado en % del capital
-- Break Even automático
+Risk Manager - Gestion de Riesgo v2.0
+=======================================
+- Calculo de lotaje basado en % del capital
+- SL/TP dinamico basado en ATR (o fijo como fallback)
+- Break Even automatico con buffer de spread
 - Trailing Stop
+- Validacion de margen libre antes de operar
 """
 
 import logging
@@ -13,42 +15,40 @@ logger = logging.getLogger(__name__)
 
 
 class RiskManager:
-    """Gestión de riesgo para operaciones de trading."""
+    """Gestion de riesgo para operaciones de trading v2.0."""
 
-    def calculate_lot_size(self, balance: float, symbol_info: dict) -> float:
+    def calculate_lot_size(self, balance: float, symbol_info: dict,
+                           sl_distance_price: float = None) -> float:
         """
-        Calcular tamaño de lote basado en 5% del capital.
+        Calcular tamano de lote basado en % del capital.
 
-        Para XAUUSD:
-        - 1 lote = 100 oz de oro
-        - 1 pip = $0.01 de movimiento en precio
-        - Valor de 1 pip por lote = $1.00 (para la mayoría de brokers)
-        - Con SL de 20 pips: riesgo por lote = 20 * $1.00 = $20
-
-        Nota: Esto puede variar según el broker. Ajustar si es necesario.
+        Args:
+            balance: Balance de la cuenta
+            symbol_info: Info del simbolo (point, contract_size, etc.)
+            sl_distance_price: Distancia del SL en precio (para ATR dinamico).
+                              Si es None, usa STOP_LOSS_PIPS fijo.
         """
         risk_amount = balance * (config.RISK_PERCENT / 100)
 
-        # Valor del pip para XAUUSD
-        # Para la mayoría de brokers: 1 pip = 0.01, valor por lote = $1.00
         point = symbol_info.get("point", 0.01)
         contract_size = symbol_info.get("trade_contract_size", 100)
 
-        # Valor de 1 pip por 1 lote
-        pip_value_per_lot = point * 10 * contract_size  # $1.00 típicamente
+        if sl_distance_price is not None:
+            # ATR dinamico: la distancia ya esta en precio
+            # Valor monetario de la distancia por 1 lote
+            value_per_lot = sl_distance_price * contract_size
+        else:
+            # Pips fijos (fallback)
+            pip_value_per_lot = point * 10 * contract_size
+            value_per_lot = config.STOP_LOSS_PIPS * pip_value_per_lot
 
-        # Si no se pudo calcular, usar valor estándar
-        if pip_value_per_lot == 0:
-            pip_value_per_lot = 1.0
-            logger.warning("Usando pip value por defecto: $1.00")
+        if value_per_lot == 0:
+            value_per_lot = config.STOP_LOSS_PIPS * 1.0
+            logger.warning("Usando valor de riesgo por defecto")
 
-        # Riesgo total en pips
-        risk_in_pips = config.STOP_LOSS_PIPS
+        lot_size = risk_amount / value_per_lot
 
-        # Lotaje = Riesgo en $ / (SL en pips * valor del pip por lote)
-        lot_size = risk_amount / (risk_in_pips * pip_value_per_lot)
-
-        # Redondear al step mínimo del broker
+        # Redondear al step minimo del broker
         volume_step = symbol_info.get("volume_step", 0.01)
         volume_min = symbol_info.get("volume_min", 0.01)
         volume_max = symbol_info.get("volume_max", 100.0)
@@ -57,60 +57,90 @@ class RiskManager:
         lot_size = min(lot_size, volume_max)
         lot_size = round(lot_size, 2)
 
-        logger.info(f"💰 Cálculo de lote: Balance=${balance:.2f} | "
+        sl_info = f"ATR dist={sl_distance_price:.2f}" if sl_distance_price else f"Fijo {config.STOP_LOSS_PIPS} pips"
+        logger.info(f"Calculo de lote: Balance=${balance:.2f} | "
                      f"Riesgo={config.RISK_PERCENT}% = ${risk_amount:.2f} | "
-                     f"Lote={lot_size}")
+                     f"SL={sl_info} | Lote={lot_size}")
 
         return lot_size
 
     def calculate_sl_tp(self, order_type: str, current_price: float,
-                        symbol_info: dict) -> dict:
-        """Calcular niveles de SL y TP."""
-        point = symbol_info.get("point", 0.01)
+                        symbol_info: dict, atr_levels: dict = None) -> dict:
+        """
+        Calcular niveles de SL y TP.
 
-        # Convertir pips a precio (1 pip = 10 points para XAUUSD)
-        sl_distance = config.STOP_LOSS_PIPS * point * 10
-        tp_distance = config.TAKE_PROFIT_PIPS * point * 10
+        Args:
+            order_type: "BUY" o "SELL"
+            current_price: Precio de entrada
+            symbol_info: Info del simbolo
+            atr_levels: dict con sl_distance y tp_distance del ATR dinamico.
+                       Si es None, usa pips fijos.
+        """
+        digits = symbol_info.get("digits", 2)
+
+        if atr_levels is not None:
+            # ATR dinamico
+            sl_distance = atr_levels["sl_distance"]
+            tp_distance = atr_levels["tp_distance"]
+            mode = "ATR"
+        else:
+            # Pips fijos (fallback)
+            point = symbol_info.get("point", 0.01)
+            sl_distance = config.STOP_LOSS_PIPS * point * 10
+            tp_distance = config.TAKE_PROFIT_PIPS * point * 10
+            mode = "FIJO"
 
         if order_type == "BUY":
-            sl = round(current_price - sl_distance, 2)
-            tp = round(current_price + tp_distance, 2)
+            sl = round(current_price - sl_distance, digits)
+            tp = round(current_price + tp_distance, digits)
         else:  # SELL
-            sl = round(current_price + sl_distance, 2)
-            tp = round(current_price - tp_distance, 2)
+            sl = round(current_price + sl_distance, digits)
+            tp = round(current_price - tp_distance, digits)
 
-        logger.info(f"📐 SL/TP calculados: {order_type} @ {current_price:.2f} | "
-                     f"SL={sl:.2f} ({config.STOP_LOSS_PIPS} pips) | "
-                     f"TP={tp:.2f} ({config.TAKE_PROFIT_PIPS} pips)")
+        logger.info(f"SL/TP [{mode}]: {order_type} @ {current_price:.{digits}f} | "
+                     f"SL={sl:.{digits}f} (dist={sl_distance:.2f}) | "
+                     f"TP={tp:.{digits}f} (dist={tp_distance:.2f})")
 
-        return {"sl": sl, "tp": tp}
+        return {"sl": sl, "tp": tp, "sl_distance": sl_distance}
 
     def check_break_even(self, position: dict, symbol_info: dict) -> dict:
         """
         Verificar si se debe mover el SL a break even.
+        Incluye buffer de spread para evitar cierre prematuro.
 
         Returns:
             {"action": "move_be", "new_sl": float} o {"action": "none"}
         """
         point = symbol_info.get("point", 0.01)
+        spread = symbol_info.get("spread", 0) * point
         be_distance = config.BREAK_EVEN_PIPS * point * 10
 
         open_price = position["open_price"]
         current_price = position["current_price"]
         current_sl = position["sl"]
 
+        # Buffer: entrada + spread + 1 pip (evita que el spread active el SL)
+        use_spread_buffer = getattr(config, 'BREAK_EVEN_SPREAD_BUFFER', True)
+        if use_spread_buffer:
+            be_buffer = spread + (point * 10)  # spread + 1 pip
+        else:
+            be_buffer = point * 10  # 1 pip (comportamiento anterior)
+
         if position["type"] == "BUY":
-            # Si el precio subió +15 pips y el SL no está en BE
             if (current_price >= open_price + be_distance and
                     current_sl < open_price):
-                logger.info(f"🔒 Break Even activado para ticket {position['ticket']}")
-                return {"action": "move_be", "new_sl": open_price + (point * 10)}  # +1 pip sobre entrada
+                new_sl = round(open_price + be_buffer, symbol_info.get("digits", 2))
+                logger.info(f"Break Even activado para ticket {position['ticket']} | "
+                             f"Nuevo SL={new_sl} (buffer spread={spread:.2f})")
+                return {"action": "move_be", "new_sl": new_sl}
 
         else:  # SELL
             if (current_price <= open_price - be_distance and
                     current_sl > open_price):
-                logger.info(f"🔒 Break Even activado para ticket {position['ticket']}")
-                return {"action": "move_be", "new_sl": open_price - (point * 10)}
+                new_sl = round(open_price - be_buffer, symbol_info.get("digits", 2))
+                logger.info(f"Break Even activado para ticket {position['ticket']} | "
+                             f"Nuevo SL={new_sl} (buffer spread={spread:.2f})")
+                return {"action": "move_be", "new_sl": new_sl}
 
         return {"action": "none"}
 
@@ -122,6 +152,7 @@ class RiskManager:
             {"action": "trail", "new_sl": float} o {"action": "none"}
         """
         point = symbol_info.get("point", 0.01)
+        digits = symbol_info.get("digits", 2)
         trail_activate = config.TRAILING_ACTIVATE_PIPS * point * 10
         trail_step = config.TRAILING_STEP_PIPS * point * 10
 
@@ -130,24 +161,50 @@ class RiskManager:
         current_sl = position["sl"]
 
         if position["type"] == "BUY":
-            # Si el precio subió +40 pips
             if current_price >= open_price + trail_activate:
-                new_sl = round(current_price - trail_step, 2)
-                # Solo mover si el nuevo SL es mayor que el actual
+                new_sl = round(current_price - trail_step, digits)
                 if new_sl > current_sl:
-                    logger.info(f"📈 Trailing Stop: ticket {position['ticket']} | "
-                                 f"Nuevo SL={new_sl:.2f}")
+                    logger.info(f"Trailing Stop: ticket {position['ticket']} | "
+                                 f"Nuevo SL={new_sl:.{digits}f}")
                     return {"action": "trail", "new_sl": new_sl}
 
         else:  # SELL
             if current_price <= open_price - trail_activate:
-                new_sl = round(current_price + trail_step, 2)
+                new_sl = round(current_price + trail_step, digits)
                 if new_sl < current_sl:
-                    logger.info(f"📉 Trailing Stop: ticket {position['ticket']} | "
-                                 f"Nuevo SL={new_sl:.2f}")
+                    logger.info(f"Trailing Stop: ticket {position['ticket']} | "
+                                 f"Nuevo SL={new_sl:.{digits}f}")
                     return {"action": "trail", "new_sl": new_sl}
 
         return {"action": "none"}
+
+    def check_margin(self, free_margin: float, required_margin: float) -> bool:
+        """
+        Verificar si hay suficiente margen libre para abrir un trade.
+
+        Args:
+            free_margin: Margen libre de la cuenta
+            required_margin: Margen requerido estimado para la operacion
+
+        Returns:
+            True si hay margen suficiente, False si no
+        """
+        safety_factor = getattr(config, 'MARGIN_SAFETY_FACTOR', 1.5)
+        min_margin_needed = required_margin * safety_factor
+
+        if free_margin < min_margin_needed:
+            logger.warning(
+                f"Margen insuficiente: Libre=${free_margin:.2f} | "
+                f"Requerido=${required_margin:.2f} x {safety_factor} = "
+                f"${min_margin_needed:.2f}"
+            )
+            return False
+
+        logger.info(
+            f"Margen OK: Libre=${free_margin:.2f} | "
+            f"Minimo=${min_margin_needed:.2f}"
+        )
+        return True
 
     def can_open_trade(self, open_positions: list) -> bool:
         """Verificar si se puede abrir un nuevo trade."""
@@ -155,7 +212,7 @@ class RiskManager:
         can_trade = len(xau_positions) < config.MAX_OPEN_TRADES
 
         if not can_trade:
-            logger.info(f"⛔ Máximo de trades alcanzado: "
+            logger.info(f"Maximo de trades alcanzado: "
                          f"{len(xau_positions)}/{config.MAX_OPEN_TRADES}")
 
         return can_trade
