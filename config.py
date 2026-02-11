@@ -23,14 +23,16 @@ TIMEFRAME = "H1"                  # Temporalidad principal
 # ============================================
 
 RISK_PERCENT = 0.75               # % del capital por operación
-STOP_LOSS_PIPS = 20              # Stop Loss en pips
-TAKE_PROFIT_PIPS = 60            # Take Profit en pips
+STOP_LOSS_PIPS = 20              # Stop Loss en pips (fallback si ATR no disponible)
+TAKE_PROFIT_PIPS = 60            # Take Profit en pips (fallback si ATR no disponible)
 MAX_OPEN_TRADES = 2              # Máximo de trades abiertos simultáneamente
+MARGIN_SAFETY_FACTOR = 1.5       # Factor de seguridad para margen libre (1.5x margen requerido)
 
 # ============================================
 # BREAK EVEN Y TRAILING STOP
 # ============================================
 BREAK_EVEN_PIPS = 15             # Mover SL a entrada cuando el precio llegue a +15 pips
+BREAK_EVEN_SPREAD_BUFFER = True  # Agregar spread al break even para evitar cierre prematuro
 TRAILING_ACTIVATE_PIPS = 40      # Activar trailing stop a +40 pips
 TRAILING_STEP_PIPS = 15          # Trailing de 15 pips
 
@@ -40,8 +42,24 @@ TRAILING_STEP_PIPS = 15          # Trailing de 15 pips
 EMA_FAST = 21                    # EMA rápida
 EMA_SLOW = 50                    # EMA lenta
 RSI_PERIOD = 14                  # Período RSI
-RSI_LOWER = 40                   # RSI mínimo para entrada
-RSI_UPPER = 60                   # RSI máximo para entrada
+RSI_LOWER = 35                   # RSI mínimo para entrada (ampliado de 40 a 35)
+RSI_UPPER = 65                   # RSI máximo para entrada (ampliado de 60 a 65)
+
+# ============================================
+# ATR DINÁMICO PARA SL/TP
+# ============================================
+ATR_PERIOD = 14                  # Período ATR
+ATR_SL_MULTIPLIER = 1.5          # SL = ATR * 1.5
+ATR_TP_MULTIPLIER = 4.5          # TP = ATR * 4.5 (ratio 1:3)
+USE_DYNAMIC_SL_TP = True         # Usar ATR dinámico en lugar de pips fijos
+ATR_VOLATILITY_FILTER = True     # Filtrar mercados demasiado volátiles
+ATR_MAX_MULTIPLIER = 2.0         # No operar si ATR actual > ATR_SMA(50) * este factor
+
+# ============================================
+# SMART MONEY - LIQUIDITY SWEEP
+# ============================================
+LIQUIDITY_LOOKBACK = 10          # Velas hacia atrás para buscar niveles de liquidez
+PULLBACK_LOOKBACK = 5            # Velas máximas para confirmar pullback
 
 # ============================================
 # FILTROS DE SESIÓN (UTC)

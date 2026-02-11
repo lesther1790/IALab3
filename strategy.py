@@ -1,12 +1,20 @@
 """
-Estrategia de Trading - XAUUSD Trend Following + Smart Money + Fibonacci OTE
-===============================================================================
+Estrategia de Trading - XAUUSD Trend Following + Smart Money + Fibonacci OTE v2.0
+===================================================================================
 Confluencias requeridas (5/5):
 1. Tendencia: EMA 21/50
-2. RSI en zona neutra (40-60)
-3. Pullback a EMA 21
-4. Liquidity Sweep confirma dirección
-5. Precio en zona OTE de Fibonacci (61.8% - 78.6%)
+2. RSI en zona neutra (35-65)
+3. Pullback a EMA 21 (multi-vela)
+4. Liquidity Sweep estructural confirma direccion
+5. Precio en zona OTE de Fibonacci (61.8% - 78.6%) con validacion temporal
+
+Mejoras v2.0:
+- ATR dinamico para SL/TP adaptativo a volatilidad
+- Liquidity Sweep mejorado: busca niveles estructurales (N velas)
+- Pullback multi-vela (hasta 5 velas)
+- Fibonacci con validacion de secuencia temporal de fractales
+- Filtro de volatilidad excesiva (ATR)
+- RSI con proteccion contra division por cero
 """
 
 import pandas as pd
@@ -19,53 +27,155 @@ logger = logging.getLogger(__name__)
 
 
 class Strategy:
-    """Estrategia Trend Following + Smart Money + Fibonacci OTE para XAUUSD."""
+    """Estrategia Trend Following + Smart Money + Fibonacci OTE para XAUUSD v2.0."""
 
     def __init__(self):
-        self.name = "XAUUSD Trend Following + Liquidity Sweep + Fibonacci OTE"
+        self.name = "XAUUSD Trend Following + Liquidity Sweep + Fibonacci OTE v2.0"
         self.fractal_lookback = 5  # Velas a cada lado para detectar fractales
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calcular todos los indicadores técnicos."""
+        """Calcular todos los indicadores tecnicos."""
         df = df.copy()
 
         # EMAs
         df['ema_fast'] = df['close'].ewm(span=config.EMA_FAST, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=config.EMA_SLOW, adjust=False).mean()
 
-        # RSI
+        # RSI (con proteccion contra division por cero)
         df['rsi'] = self._calculate_rsi(df['close'], config.RSI_PERIOD)
 
-        # Tendencia (EMA rápida vs lenta)
+        # ATR (Average True Range)
+        df['atr'] = self._calculate_atr(df, config.ATR_PERIOD)
+
+        # Tendencia (EMA rapida vs lenta)
         df['trend'] = np.where(df['ema_fast'] > df['ema_slow'], 'BULLISH', 'BEARISH')
 
-        # Pullback
-        df['pullback_buy'] = (
-            (df['low'].shift(1) <= df['ema_fast'].shift(1)) &
-            (df['close'] > df['ema_fast'])
-        )
+        # Pullback mejorado (multi-vela)
+        df['pullback_buy'] = self._detect_pullback_buy(df)
+        df['pullback_sell'] = self._detect_pullback_sell(df)
 
-        df['pullback_sell'] = (
-            (df['high'].shift(1) >= df['ema_fast'].shift(1)) &
-            (df['close'] < df['ema_fast'])
-        )
-
-        # Liquidity Sweep
-        df['sweep_high'] = (
-            (df['high'] > df['high'].shift(1)) &
-            (df['close'] < df['high'].shift(1))
-        )
-
-        df['sweep_low'] = (
-            (df['low'] < df['low'].shift(1)) &
-            (df['close'] > df['low'].shift(1))
-        )
+        # Liquidity Sweep mejorado (estructural)
+        df['sweep_high'] = self._detect_sweep_high(df)
+        df['sweep_low'] = self._detect_sweep_low(df)
 
         # Fractales
         df['fractal_high'] = self._detect_fractal_high(df)
         df['fractal_low'] = self._detect_fractal_low(df)
 
         return df
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int) -> pd.Series:
+        """Calcular Average True Range (ATR)."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.ewm(span=period, adjust=False).mean()
+
+        return atr
+
+    def _detect_pullback_buy(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Detectar pullback alcista mejorado (multi-vela).
+        Busca si en las ultimas N velas alguna toco la EMA21 por abajo
+        y la vela actual cerro por encima de la EMA21.
+        """
+        lookback = getattr(config, 'PULLBACK_LOOKBACK', 5)
+        result = pd.Series(False, index=df.index)
+
+        for i in range(lookback, len(df)):
+            current_close = df['close'].iloc[i]
+            current_ema = df['ema_fast'].iloc[i]
+
+            # La vela actual debe cerrar por encima de la EMA
+            if current_close <= current_ema:
+                continue
+
+            # Buscar si alguna de las ultimas N velas toco la EMA por abajo
+            for j in range(1, lookback + 1):
+                idx = i - j
+                if idx < 0:
+                    break
+                if df['low'].iloc[idx] <= df['ema_fast'].iloc[idx]:
+                    result.iloc[i] = True
+                    break
+
+        return result
+
+    def _detect_pullback_sell(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Detectar pullback bajista mejorado (multi-vela).
+        Busca si en las ultimas N velas alguna toco la EMA21 por arriba
+        y la vela actual cerro por debajo de la EMA21.
+        """
+        lookback = getattr(config, 'PULLBACK_LOOKBACK', 5)
+        result = pd.Series(False, index=df.index)
+
+        for i in range(lookback, len(df)):
+            current_close = df['close'].iloc[i]
+            current_ema = df['ema_fast'].iloc[i]
+
+            # La vela actual debe cerrar por debajo de la EMA
+            if current_close >= current_ema:
+                continue
+
+            # Buscar si alguna de las ultimas N velas toco la EMA por arriba
+            for j in range(1, lookback + 1):
+                idx = i - j
+                if idx < 0:
+                    break
+                if df['high'].iloc[idx] >= df['ema_fast'].iloc[idx]:
+                    result.iloc[i] = True
+                    break
+
+        return result
+
+    def _detect_sweep_high(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Detectar barrido de liquidez alcista mejorado (estructural).
+        Busca si el precio rompio el maximo de las ultimas N velas
+        y luego cerro por debajo de ese maximo (trampa alcista / false breakout).
+        """
+        lookback = getattr(config, 'LIQUIDITY_LOOKBACK', 10)
+        result = pd.Series(False, index=df.index)
+
+        for i in range(lookback, len(df)):
+            # Maximo estructural de las ultimas N velas (excluyendo la actual)
+            structural_high = df['high'].iloc[i - lookback:i].max()
+
+            # La vela actual rompio el maximo estructural con su high
+            # pero cerro por debajo de el (barrido + rechazo)
+            if (df['high'].iloc[i] > structural_high and
+                    df['close'].iloc[i] < structural_high):
+                result.iloc[i] = True
+
+        return result
+
+    def _detect_sweep_low(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Detectar barrido de liquidez bajista mejorado (estructural).
+        Busca si el precio rompio el minimo de las ultimas N velas
+        y luego cerro por encima de ese minimo (trampa bajista / false breakout).
+        """
+        lookback = getattr(config, 'LIQUIDITY_LOOKBACK', 10)
+        result = pd.Series(False, index=df.index)
+
+        for i in range(lookback, len(df)):
+            # Minimo estructural de las ultimas N velas (excluyendo la actual)
+            structural_low = df['low'].iloc[i - lookback:i].min()
+
+            # La vela actual rompio el minimo estructural con su low
+            # pero cerro por encima de el (barrido + rechazo)
+            if (df['low'].iloc[i] < structural_low and
+                    df['close'].iloc[i] > structural_low):
+                result.iloc[i] = True
+
+        return result
 
     def _detect_fractal_high(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -117,15 +227,15 @@ class Strategy:
 
     def _get_last_swing_points(self, df: pd.DataFrame) -> dict:
         """
-        Obtener el último swing high y swing low confirmados
+        Obtener el ultimo swing high y swing low confirmados
         para trazar Fibonacci.
         """
-        # Último fractal high confirmado
+        # Ultimo fractal high confirmado
         fractal_highs = df[df['fractal_high'].notna()]['fractal_high']
         last_swing_high = fractal_highs.iloc[-1] if len(fractal_highs) > 0 else None
         last_swing_high_idx = fractal_highs.index[-1] if len(fractal_highs) > 0 else None
 
-        # Último fractal low confirmado
+        # Ultimo fractal low confirmado
         fractal_lows = df[df['fractal_low'].notna()]['fractal_low']
         last_swing_low = fractal_lows.iloc[-1] if len(fractal_lows) > 0 else None
         last_swing_low_idx = fractal_lows.index[-1] if len(fractal_lows) > 0 else None
@@ -139,28 +249,34 @@ class Strategy:
 
     def _check_fibonacci_ote(self, df: pd.DataFrame, direction: str) -> dict:
         """
-        Verificar si el precio actual está en la zona OTE de Fibonacci (61.8% - 78.6%).
+        Verificar si el precio actual esta en la zona OTE de Fibonacci (61.8% - 78.6%).
+        Incluye validacion de secuencia temporal de fractales.
 
-        Para COMPRA: Fibonacci desde swing low (0%) hasta swing high (100%)
-                     Zona OTE = retroceso entre 61.8% y 78.6% desde el high
-        Para VENTA: Fibonacci desde swing high (0%) hasta swing low (100%)
-                     Zona OTE = retroceso entre 61.8% y 78.6% desde el low
+        Para COMPRA: Swing high debe ser MAS RECIENTE que swing low
+                     (precio subio, hizo techo, ahora retrocede a zona OTE)
+        Para VENTA: Swing low debe ser MAS RECIENTE que swing high
+                     (precio bajo, hizo piso, ahora retrocede a zona OTE)
         """
         swings = self._get_last_swing_points(df)
-        current_price = df.iloc[-2]['close']  # Última vela cerrada
+        current_price = df.iloc[-2]['close']  # Ultima vela cerrada
 
         swing_high = swings["swing_high"]
         swing_low = swings["swing_low"]
+        swing_high_idx = swings["swing_high_idx"]
+        swing_low_idx = swings["swing_low_idx"]
 
         if swing_high is None or swing_low is None:
             logger.warning("No se encontraron fractales suficientes para Fibonacci")
             return {"in_ote": False, "fib_level": None, "zone_low": None, "zone_high": None}
 
         if direction == "BUY":
-            # Retroceso bajista: desde swing high hacia swing low
-            # El precio debe estar en la zona 61.8%-78.6% del retroceso
-            # Solo válido si el swing low es más reciente que el swing high
-            # (el precio subió, hizo swing high, ahora retrocede)
+            # Validacion temporal: el swing high debe ser MAS RECIENTE que el swing low
+            # (el precio subio, hizo techo, ahora retrocede)
+            if swing_high_idx is not None and swing_low_idx is not None:
+                if swing_high_idx <= swing_low_idx:
+                    logger.info("📐 Fibonacci BUY: Secuencia temporal invalida "
+                                f"(swing_high_idx={swing_high_idx} <= swing_low_idx={swing_low_idx})")
+                    return {"in_ote": False, "fib_level": None, "zone_low": None, "zone_high": None}
 
             swing_range = swing_high - swing_low
 
@@ -176,12 +292,17 @@ class Strategy:
 
             in_ote = zone_low <= current_price <= zone_high
 
-            # Calcular nivel exacto de Fib donde está el precio
-            fib_level = (swing_high - current_price) / swing_range if swing_range > 0 else 0
+            # Calcular nivel exacto de Fib donde esta el precio
+            fib_level = (swing_high - current_price) / swing_range
 
         else:  # SELL
-            # Retroceso alcista: desde swing low hacia swing high
-            # El precio debe estar en la zona 61.8%-78.6% del retroceso
+            # Validacion temporal: el swing low debe ser MAS RECIENTE que el swing high
+            # (el precio bajo, hizo piso, ahora retrocede hacia arriba)
+            if swing_high_idx is not None and swing_low_idx is not None:
+                if swing_low_idx <= swing_high_idx:
+                    logger.info("📐 Fibonacci SELL: Secuencia temporal invalida "
+                                f"(swing_low_idx={swing_low_idx} <= swing_high_idx={swing_high_idx})")
+                    return {"in_ote": False, "fib_level": None, "zone_low": None, "zone_high": None}
 
             swing_range = swing_high - swing_low
 
@@ -197,13 +318,14 @@ class Strategy:
 
             in_ote = zone_low <= current_price <= zone_high
 
-            fib_level = (current_price - swing_low) / swing_range if swing_range > 0 else 0
+            fib_level = (current_price - swing_low) / swing_range
 
         logger.info(
-            f"📐 Fibonacci: Swing H={swing_high:.2f} | Swing L={swing_low:.2f} | "
+            f"📐 Fibonacci: Swing H={swing_high:.2f} (idx={swing_high_idx}) | "
+            f"Swing L={swing_low:.2f} (idx={swing_low_idx}) | "
             f"OTE Zone=[{zone_low:.2f} - {zone_high:.2f}] | "
             f"Precio={current_price:.2f} | Fib={fib_level:.3f} | "
-            f"En OTE={'✅' if in_ote else '❌'}"
+            f"En OTE={'OK' if in_ote else 'NO'}"
         )
 
         return {
@@ -215,37 +337,111 @@ class Strategy:
             "swing_low": swing_low,
         }
 
-    def check_signal(self, df: pd.DataFrame) -> str:
+    def check_volatility_filter(self, df: pd.DataFrame) -> bool:
         """
-        Verificar si hay señal de trading.
+        Filtro de volatilidad: no operar si ATR actual es excesivo
+        comparado con el promedio de ATR de 50 periodos.
+        Retorna True si la volatilidad es aceptable, False si es excesiva.
+        """
+        if not getattr(config, 'ATR_VOLATILITY_FILTER', False):
+            return True
+
+        if 'atr' not in df.columns:
+            return True
+
+        current_atr = df.iloc[-2]['atr']
+        atr_sma_50 = df['atr'].rolling(window=50).mean().iloc[-2]
+
+        if pd.isna(current_atr) or pd.isna(atr_sma_50) or atr_sma_50 == 0:
+            return True
+
+        atr_ratio = current_atr / atr_sma_50
+        max_ratio = getattr(config, 'ATR_MAX_MULTIPLIER', 2.0)
+
+        if atr_ratio > max_ratio:
+            logger.info(
+                f"⚠️ Volatilidad excesiva: ATR={current_atr:.2f} | "
+                f"ATR_SMA50={atr_sma_50:.2f} | Ratio={atr_ratio:.2f} > {max_ratio}"
+            )
+            return False
+
+        logger.info(
+            f"📊 Volatilidad OK: ATR={current_atr:.2f} | "
+            f"ATR_SMA50={atr_sma_50:.2f} | Ratio={atr_ratio:.2f}"
+        )
+        return True
+
+    def get_dynamic_sl_tp(self, df: pd.DataFrame, direction: str) -> dict:
+        """
+        Calcular SL/TP dinamico basado en ATR.
+        Retorna distancias en precio (no pips).
+        Si USE_DYNAMIC_SL_TP es False, retorna None para usar pips fijos.
+        """
+        if not getattr(config, 'USE_DYNAMIC_SL_TP', False):
+            return None
+
+        if 'atr' not in df.columns:
+            return None
+
+        current_atr = df.iloc[-2]['atr']
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            return None
+
+        sl_distance = current_atr * config.ATR_SL_MULTIPLIER
+        tp_distance = current_atr * config.ATR_TP_MULTIPLIER
+
+        logger.info(
+            f"📐 ATR Dinamico: ATR={current_atr:.2f} | "
+            f"SL={sl_distance:.2f} ({config.ATR_SL_MULTIPLIER}x) | "
+            f"TP={tp_distance:.2f} ({config.ATR_TP_MULTIPLIER}x) | "
+            f"Ratio=1:{config.ATR_TP_MULTIPLIER / config.ATR_SL_MULTIPLIER:.1f}"
+        )
+
+        return {
+            "sl_distance": round(sl_distance, 2),
+            "tp_distance": round(tp_distance, 2),
+            "atr": round(current_atr, 2),
+        }
+
+    def check_signal(self, df: pd.DataFrame) -> dict:
+        """
+        Verificar si hay senal de trading.
 
         Confluencia requerida (5/5):
         1. Tendencia (EMA 21 vs EMA 50)
-        2. RSI en zona neutra (40-60)
-        3. Pullback a EMA 21
-        4. Liquidity sweep confirma dirección
-        5. Precio en zona OTE Fibonacci (61.8% - 78.6%)
+        2. RSI en zona neutra (35-65)
+        3. Pullback a EMA 21 (multi-vela)
+        4. Liquidity sweep estructural confirma direccion
+        5. Precio en zona OTE Fibonacci (61.8% - 78.6%) con validacion temporal
+
+        Filtro adicional: Volatilidad (ATR)
 
         Returns:
-            "BUY", "SELL", o "NONE"
+            dict con "signal" ("BUY", "SELL", "NONE") y "atr_levels" (opcional)
         """
         if len(df) < config.EMA_SLOW + 10:
             logger.warning("No hay suficientes velas para calcular indicadores")
-            return "NONE"
+            return {"signal": "NONE", "atr_levels": None}
 
         df = self.calculate_indicators(df)
 
-        # Última vela cerrada
+        # Filtro de volatilidad
+        if not self.check_volatility_filter(df):
+            return {"signal": "NONE", "atr_levels": None}
+
+        # Ultima vela cerrada
         last = df.iloc[-2]
 
         current_trend = last['trend']
         current_rsi = last['rsi']
 
-        # Log de análisis general
+        # Log de analisis general
+        atr_value = last['atr'] if not pd.isna(last['atr']) else 0
         logger.info(
-            f"📊 Análisis: Tendencia={current_trend} | RSI={current_rsi:.1f} | "
+            f"📊 Analisis: Tendencia={current_trend} | RSI={current_rsi:.1f} | "
             f"EMA21={last['ema_fast']:.2f} | EMA50={last['ema_slow']:.2f} | "
-            f"Close={last['close']:.2f}"
+            f"Close={last['close']:.2f} | ATR={atr_value:.2f}"
         )
         logger.info(
             f"📊 Liquidity: Sweep High={last['sweep_high']} | "
@@ -254,7 +450,10 @@ class Strategy:
             f"Pullback Sell={last['pullback_sell']}"
         )
 
-        # ========== SEÑAL DE COMPRA (5 confluencias) ==========
+        # Obtener niveles ATR dinamicos
+        atr_levels = self.get_dynamic_sl_tp(df, "BUY")
+
+        # ========== SENAL DE COMPRA (5 confluencias) ==========
         fib_buy = self._check_fibonacci_ote(df, "BUY")
 
         buy_conditions = {
@@ -269,10 +468,11 @@ class Strategy:
         logger.info(f"🟢 Compra ({buy_met}/5): {buy_conditions}")
 
         if all(buy_conditions.values()):
-            logger.info("🟢 ✅ SEÑAL DE COMPRA - 5/5 confluencias alineadas")
-            return "BUY"
+            logger.info("🟢 SENAL DE COMPRA - 5/5 confluencias alineadas")
+            atr_levels = self.get_dynamic_sl_tp(df, "BUY")
+            return {"signal": "BUY", "atr_levels": atr_levels}
 
-        # ========== SEÑAL DE VENTA (5 confluencias) ==========
+        # ========== SENAL DE VENTA (5 confluencias) ==========
         fib_sell = self._check_fibonacci_ote(df, "SELL")
 
         sell_conditions = {
@@ -287,18 +487,19 @@ class Strategy:
         logger.info(f"🔴 Venta ({sell_met}/5): {sell_conditions}")
 
         if all(sell_conditions.values()):
-            logger.info("🔴 ✅ SEÑAL DE VENTA - 5/5 confluencias alineadas")
-            return "SELL"
+            logger.info("🔴 SENAL DE VENTA - 5/5 confluencias alineadas")
+            atr_levels = self.get_dynamic_sl_tp(df, "SELL")
+            return {"signal": "SELL", "atr_levels": atr_levels}
 
         # Log de confluencias parciales
         if buy_met >= 4 or sell_met >= 4:
-            logger.info(f"⚠️ Casi señal: Compra {buy_met}/5, Venta {sell_met}/5")
+            logger.info(f"⚠️ Casi senal: Compra {buy_met}/5, Venta {sell_met}/5")
 
-        logger.info("⚪ Sin señal")
-        return "NONE"
+        logger.info("Sin senal")
+        return {"signal": "NONE", "atr_levels": None}
 
     def is_session_active(self) -> bool:
-        """Verificar si estamos en sesión de Londres o New York (UTC)."""
+        """Verificar si estamos en sesion de Londres o New York (UTC)."""
         now_utc = datetime.now(timezone.utc)
         hour = now_utc.hour
 
@@ -306,18 +507,18 @@ class Strategy:
 
         # No operar fines de semana
         if now_utc.weekday() >= 5:
-            logger.info("📅 Fin de semana - mercado cerrado")
+            logger.info("Fin de semana - mercado cerrado")
             return False
 
         if not is_active:
-            logger.info(f"🕐 Fuera de sesión ({hour}:00 UTC). "
-                         f"Sesión activa: {config.SESSION_START_HOUR}:00 - "
+            logger.info(f"Fuera de sesion ({hour}:00 UTC). "
+                         f"Sesion activa: {config.SESSION_START_HOUR}:00 - "
                          f"{config.SESSION_END_HOUR}:00 UTC")
 
         return is_active
 
     def _calculate_rsi(self, prices: pd.Series, period: int) -> pd.Series:
-        """Calcular RSI."""
+        """Calcular RSI con proteccion contra division por cero."""
         delta = prices.diff()
 
         gain = delta.where(delta > 0, 0.0)
@@ -326,8 +527,14 @@ class Strategy:
         avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
         avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
 
-        rs = avg_gain / avg_loss
+        # Proteccion contra division por cero
+        rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
+
+        # Si avg_loss es 0 (solo ganancias), RSI = 100
+        # Si avg_gain es 0 (solo perdidas), RSI = 0
+        rsi = rsi.fillna(100)
+        rsi = rsi.clip(0, 100)
 
         return rsi
 
@@ -339,11 +546,14 @@ class Strategy:
         fib_buy = self._check_fibonacci_ote(df, "BUY")
         fib_sell = self._check_fibonacci_ote(df, "SELL")
 
+        atr_value = last['atr'] if not pd.isna(last['atr']) else 0
+
         return {
             "trend": last['trend'],
             "ema_fast": round(last['ema_fast'], 2),
             "ema_slow": round(last['ema_slow'], 2),
             "rsi": round(last['rsi'], 1),
+            "atr": round(atr_value, 2),
             "close": round(last['close'], 2),
             "pullback_buy": bool(last['pullback_buy']),
             "pullback_sell": bool(last['pullback_sell']),

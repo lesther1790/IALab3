@@ -1,7 +1,12 @@
 """
-Agente de Trading - Loop Principal
-====================================
-Monitorea el mercado y ejecuta operaciones automáticamente.
+Agente de Trading - Loop Principal v2.0
+=========================================
+Monitorea el mercado y ejecuta operaciones automaticamente.
+
+Mejoras v2.0:
+- Validacion de margen libre antes de abrir trades
+- Soporte para SL/TP dinamico basado en ATR
+- Interfaz actualizada con strategy.check_signal() -> dict
 """
 
 import time
@@ -29,19 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 class TradingAgent:
-    """Agente de trading automatizado para XAUUSD."""
+    """Agente de trading automatizado para XAUUSD v2.0."""
 
     def __init__(self):
         self.mt5 = MT5Connector()
         self.strategy = Strategy()
         self.risk = RiskManager()
         self.notifier = Notifier()
-        self.last_signal_time = None  # Evitar señales duplicadas en la misma vela
+        self.last_signal_time = None  # Evitar senales duplicadas en la misma vela
 
     def start(self):
         """Iniciar el agente."""
         logger.info("=" * 60)
-        logger.info("🤖 AGENTE DE TRADING XAUUSD - INICIANDO")
+        logger.info("AGENTE DE TRADING XAUUSD v2.0 - INICIANDO")
         logger.info("=" * 60)
 
         # Conectar a MT5
@@ -52,13 +57,20 @@ class TradingAgent:
 
         # Mostrar info de cuenta
         account = self.mt5.get_account_info()
-        logger.info(f"📊 Cuenta: {account.get('login')} | "
+        logger.info(f"Cuenta: {account.get('login')} | "
                      f"Balance: ${account.get('balance', 0):.2f} | "
                      f"Apalancamiento: 1:{account.get('leverage', 0)}")
 
+        # Log de configuracion activa
+        dynamic_mode = "ATR Dinamico" if getattr(config, 'USE_DYNAMIC_SL_TP', False) else "Pips Fijos"
+        logger.info(f"Modo SL/TP: {dynamic_mode} | "
+                     f"Riesgo: {config.RISK_PERCENT}% | "
+                     f"Max Trades: {config.MAX_OPEN_TRADES}")
+
         self.notifier.notify_status(
-            f"Agente iniciado\nCuenta: {account.get('login')}\n"
-            f"Balance: ${account.get('balance', 0):.2f}"
+            f"Agente v2.0 iniciado\nCuenta: {account.get('login')}\n"
+            f"Balance: ${account.get('balance', 0):.2f}\n"
+            f"Modo: {dynamic_mode}"
         )
 
         # Loop principal
@@ -76,7 +88,7 @@ class TradingAgent:
                 time.sleep(config.CHECK_INTERVAL_SECONDS)
 
             except KeyboardInterrupt:
-                logger.info("⏹️ Agente detenido por el usuario")
+                logger.info("Agente detenido por el usuario")
                 self.notifier.notify_status("Agente detenido manualmente")
                 break
 
@@ -84,11 +96,11 @@ class TradingAgent:
                 logger.error(f"Error en loop principal: {e}", exc_info=True)
                 self.notifier.notify_error(str(e))
 
-                # Intentar reconexión
+                # Intentar reconexion
                 reconnect_attempts += 1
                 if reconnect_attempts >= max_reconnect:
-                    logger.critical("Máximo de intentos de reconexión alcanzado. Abortando.")
-                    self.notifier.notify_error("Agente detenido: máximo de reconexiones")
+                    logger.critical("Maximo de intentos de reconexion alcanzado. Abortando.")
+                    self.notifier.notify_error("Agente detenido: maximo de reconexiones")
                     break
 
                 logger.info(f"Esperando 30s antes de reconectar... "
@@ -101,9 +113,9 @@ class TradingAgent:
         self.mt5.disconnect()
 
     def _tick(self):
-        """Un ciclo de verificación del mercado."""
+        """Un ciclo de verificacion del mercado."""
 
-        # 1. Verificar sesión activa
+        # 1. Verificar sesion activa
         if not self.strategy.is_session_active():
             return
 
@@ -121,32 +133,61 @@ class TradingAgent:
             logger.warning("No se pudieron obtener velas")
             return
 
-        # 5. Evitar señales duplicadas en la misma vela
+        # 5. Evitar senales duplicadas en la misma vela
         last_candle_time = df.iloc[-2]['time']
         if self.last_signal_time == last_candle_time:
             return
 
-        # 6. Verificar señal
-        signal = self.strategy.check_signal(df)
+        # 6. Verificar senal (ahora retorna dict con signal y atr_levels)
+        result = self.strategy.check_signal(df)
+        signal = result["signal"]
+        atr_levels = result["atr_levels"]
 
         if signal == "NONE":
             return
 
-        # 7. Ejecutar trade
-        self._execute_trade(signal)
+        # 7. Validar margen antes de ejecutar
+        account_info = self.mt5.get_account_info()
+        free_margin = account_info.get("free_margin", 0)
+        symbol_info = self.mt5.get_symbol_info(config.SYMBOL)
+
+        if symbol_info:
+            # Estimar margen requerido (precio * lotaje / apalancamiento)
+            balance = account_info.get("balance", 0)
+            sl_dist = atr_levels["sl_distance"] if atr_levels else None
+            estimated_lot = self.risk.calculate_lot_size(balance, symbol_info, sl_dist)
+
+            price = self.mt5.get_current_price(config.SYMBOL)
+            if price:
+                leverage = account_info.get("leverage", 100)
+                entry_price = price["ask"] if signal == "BUY" else price["bid"]
+                contract_size = symbol_info.get("trade_contract_size", 100)
+                estimated_margin = (entry_price * estimated_lot * contract_size) / leverage
+
+                if not self.risk.check_margin(free_margin, estimated_margin):
+                    logger.warning("Trade cancelado por margen insuficiente")
+                    self.notifier.notify_error(
+                        f"Trade {signal} cancelado: margen insuficiente "
+                        f"(libre=${free_margin:.2f}, requerido~${estimated_margin:.2f})"
+                    )
+                    return
+
+        # 8. Ejecutar trade
+        self._execute_trade(signal, atr_levels)
         self.last_signal_time = last_candle_time
 
-    def _execute_trade(self, signal: str):
-        """Ejecutar una operación de trading."""
-        # Obtener info del símbolo
+    def _execute_trade(self, signal: str, atr_levels: dict = None):
+        """Ejecutar una operacion de trading."""
+        # Obtener info del simbolo
         symbol_info = self.mt5.get_symbol_info(config.SYMBOL)
         if not symbol_info:
-            logger.error("No se pudo obtener info del símbolo")
+            logger.error("No se pudo obtener info del simbolo")
             return
 
-        # Calcular lotaje
+        # Calcular lotaje (con distancia ATR si disponible)
         balance = self.mt5.get_account_balance()
-        lot_size = self.risk.calculate_lot_size(balance, symbol_info)
+        sl_distance = atr_levels["sl_distance"] if atr_levels else None
+        lot_size = self.risk.calculate_lot_size(balance, symbol_info, sl_distance)
 
         # Obtener precio actual
         price = self.mt5.get_current_price(config.SYMBOL)
@@ -156,8 +197,8 @@ class TradingAgent:
 
         entry_price = price["ask"] if signal == "BUY" else price["bid"]
 
-        # Calcular SL y TP
-        levels = self.risk.calculate_sl_tp(signal, entry_price, symbol_info)
+        # Calcular SL y TP (con niveles ATR si disponibles)
+        levels = self.risk.calculate_sl_tp(signal, entry_price, symbol_info, atr_levels)
 
         # Abrir trade
         result = self.mt5.open_trade(
@@ -166,14 +207,14 @@ class TradingAgent:
             volume=lot_size,
             sl=levels["sl"],
             tp=levels["tp"],
-            comment=f"AI Agent {signal}"
+            comment=f"AI Agent v2 {signal}"
         )
 
         if result["success"]:
             self.notifier.notify_trade_opened(result)
-            logger.info(f"✅ Trade ejecutado exitosamente: {result}")
+            logger.info(f"Trade ejecutado: {result}")
         else:
-            logger.error(f"❌ Error ejecutando trade: {result['error']}")
+            logger.error(f"Error ejecutando trade: {result['error']}")
             self.notifier.notify_error(f"Error abriendo trade: {result['error']}")
 
     def _manage_open_positions(self):
@@ -188,8 +229,9 @@ class TradingAgent:
             return
 
         for pos in positions:
-            # Solo gestionar trades del agente
-            if "AI Agent" not in pos.get("comment", ""):
+            # Solo gestionar trades del agente (v1 y v2)
+            comment = pos.get("comment", "")
+            if "AI Agent" not in comment:
                 continue
 
             # Verificar Break Even
