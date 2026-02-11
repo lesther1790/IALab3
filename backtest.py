@@ -15,6 +15,7 @@ from datetime import datetime
 import logging
 import config
 from strategy import Strategy
+from ml_classifier import SignalClassifier, FEATURE_COLUMNS
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -28,10 +29,12 @@ class BacktestEngine:
 
     def __init__(self, initial_balance: float = 10000.0):
         self.strategy = Strategy()
+        self.classifier = SignalClassifier()
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity_curve = []
         self.trades = []
+        self.training_samples = []  # Datos para entrenar ML
         self.open_trade = None
 
     def run(self, df: pd.DataFrame) -> dict:
@@ -47,6 +50,7 @@ class BacktestEngine:
         self.balance = self.initial_balance
         self.equity_curve = [self.initial_balance]
         self.trades = []
+        self.training_samples = []
         self.open_trade = None
 
         min_bars = config.EMA_SLOW + 20
@@ -80,7 +84,33 @@ class BacktestEngine:
 
         metrics = self._calculate_metrics()
         self._print_report(metrics)
+        metrics["training_samples"] = len(self.training_samples)
         return metrics
+
+    def export_training_data(self, filepath: str = "training_data.csv") -> pd.DataFrame:
+        """
+        Exportar datos de entrenamiento para el modelo ML.
+
+        Cada fila tiene los features del momento de entrada + label (1=win, 0=loss).
+        Debe llamarse despues de run().
+
+        Returns:
+            DataFrame con los datos de entrenamiento
+        """
+        if not self.training_samples:
+            print("Sin datos de entrenamiento. Ejecuta run() primero.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(self.training_samples)
+        df.to_csv(filepath, index=False)
+
+        wins = df["label"].sum()
+        total = len(df)
+        print(f"\nDatos ML exportados: {filepath}")
+        print(f"  Muestras: {total} | Wins: {wins} ({wins/total*100:.1f}%) | "
+              f"Losses: {total - wins} ({(total-wins)/total*100:.1f}%)")
+
+        return df
 
     def _check_entry(self, window: pd.DataFrame, current_bar: pd.Series):
         """Verificar si hay senal de entrada."""
@@ -101,6 +131,17 @@ class BacktestEngine:
 
         if signal == "NONE":
             return
+
+        # Extraer features ML para este trade
+        df_with_indicators = self.strategy.calculate_indicators(window)
+        fib_level = result.get("confluences_detail", {}).get("fibonacci_ote", None)
+        # Obtener fib_level numerico desde el detalle de check_signal
+        fib_data = self.strategy._check_fibonacci_ote(df_with_indicators, signal)
+        fib_level_num = fib_data.get("fib_level") if fib_data.get("in_ote") else 0.0
+
+        ml_features = self.classifier.extract_features(
+            df_with_indicators, signal, confluences_met, fib_level_num
+        )
 
         entry_price = current_bar['close']
 
@@ -137,6 +178,7 @@ class BacktestEngine:
             "be_activated": False,
             "confluences": confluences_met,
             "risk_percent": risk_percent,
+            "ml_features": ml_features,
         }
 
     def _manage_trade(self, bar: pd.Series):
@@ -208,6 +250,16 @@ class BacktestEngine:
         }
 
         self.trades.append(trade_record)
+
+        # Guardar sample de entrenamiento ML (features + label)
+        ml_features = trade.get("ml_features")
+        if ml_features is not None:
+            sample = dict(ml_features)
+            sample["label"] = 1 if pnl > 0 else 0
+            sample["pnl"] = round(pnl, 2)
+            sample["reason"] = reason
+            self.training_samples.append(sample)
+
         self.open_trade = None
 
     def _unrealized_pnl(self, bar: pd.Series) -> float:
