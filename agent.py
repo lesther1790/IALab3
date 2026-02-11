@@ -138,10 +138,12 @@ class TradingAgent:
         if self.last_signal_time == last_candle_time:
             return
 
-        # 6. Verificar senal (ahora retorna dict con signal y atr_levels)
+        # 6. Verificar senal (retorna dict con signal, atr_levels, confluencias, riesgo)
         result = self.strategy.check_signal(df)
         signal = result["signal"]
         atr_levels = result["atr_levels"]
+        confluences_met = result.get("confluences_met", 0)
+        risk_percent = result.get("risk_percent", config.RISK_PERCENT)
 
         if signal == "NONE":
             return
@@ -152,10 +154,11 @@ class TradingAgent:
         symbol_info = self.mt5.get_symbol_info(config.SYMBOL)
 
         if symbol_info:
-            # Estimar margen requerido (precio * lotaje / apalancamiento)
             balance = account_info.get("balance", 0)
             sl_dist = atr_levels["sl_distance"] if atr_levels else None
-            estimated_lot = self.risk.calculate_lot_size(balance, symbol_info, sl_dist)
+            estimated_lot = self.risk.calculate_lot_size(
+                balance, symbol_info, sl_dist, risk_percent
+            )
 
             price = self.mt5.get_current_price(config.SYMBOL)
             if price:
@@ -168,26 +171,29 @@ class TradingAgent:
                     logger.warning("Trade cancelado por margen insuficiente")
                     self.notifier.notify_error(
                         f"Trade {signal} cancelado: margen insuficiente "
-                        f"(libre=${free_margin:.2f}, requerido~${estimated_margin:.2f})"
+                        f"(libre=${free_margin:.2f}, requerido~=${estimated_margin:.2f})"
                     )
                     return
 
-        # 8. Ejecutar trade
-        self._execute_trade(signal, atr_levels)
+        # 8. Ejecutar trade con riesgo escalonado
+        self._execute_trade(signal, atr_levels, confluences_met, risk_percent)
         self.last_signal_time = last_candle_time
 
-    def _execute_trade(self, signal: str, atr_levels: dict = None):
-        """Ejecutar una operacion de trading."""
+    def _execute_trade(self, signal: str, atr_levels: dict = None,
+                       confluences_met: int = 5, risk_percent: float = None):
+        """Ejecutar una operacion de trading con riesgo escalonado."""
         # Obtener info del simbolo
         symbol_info = self.mt5.get_symbol_info(config.SYMBOL)
         if not symbol_info:
             logger.error("No se pudo obtener info del simbolo")
             return
 
-        # Calcular lotaje (con distancia ATR si disponible)
+        # Calcular lotaje con riesgo escalonado
         balance = self.mt5.get_account_balance()
         sl_distance = atr_levels["sl_distance"] if atr_levels else None
-        lot_size = self.risk.calculate_lot_size(balance, symbol_info, sl_distance)
+        lot_size = self.risk.calculate_lot_size(
+            balance, symbol_info, sl_distance, risk_percent
+        )
 
         # Obtener precio actual
         price = self.mt5.get_current_price(config.SYMBOL)
@@ -200,6 +206,9 @@ class TradingAgent:
         # Calcular SL y TP (con niveles ATR si disponibles)
         levels = self.risk.calculate_sl_tp(signal, entry_price, symbol_info, atr_levels)
 
+        # Comentario incluye confluencias para rastreo
+        comment = f"AI Agent v2 {signal} {confluences_met}/5 R{risk_percent}%"
+
         # Abrir trade
         result = self.mt5.open_trade(
             symbol=config.SYMBOL,
@@ -207,12 +216,14 @@ class TradingAgent:
             volume=lot_size,
             sl=levels["sl"],
             tp=levels["tp"],
-            comment=f"AI Agent v2 {signal}"
+            comment=comment
         )
 
         if result["success"]:
+            result["confluences"] = confluences_met
+            result["risk_percent"] = risk_percent
             self.notifier.notify_trade_opened(result)
-            logger.info(f"Trade ejecutado: {result}")
+            logger.info(f"Trade ejecutado ({confluences_met}/5, {risk_percent}%): {result}")
         else:
             logger.error(f"Error ejecutando trade: {result['error']}")
             self.notifier.notify_error(f"Error abriendo trade: {result['error']}")

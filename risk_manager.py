@@ -18,7 +18,8 @@ class RiskManager:
     """Gestion de riesgo para operaciones de trading v2.0."""
 
     def calculate_lot_size(self, balance: float, symbol_info: dict,
-                           sl_distance_price: float = None) -> float:
+                           sl_distance_price: float = None,
+                           risk_percent: float = None) -> float:
         """
         Calcular tamano de lote basado en % del capital.
 
@@ -27,18 +28,18 @@ class RiskManager:
             symbol_info: Info del simbolo (point, contract_size, etc.)
             sl_distance_price: Distancia del SL en precio (para ATR dinamico).
                               Si es None, usa STOP_LOSS_PIPS fijo.
+            risk_percent: % de riesgo a usar. Si es None, usa config.RISK_PERCENT.
+                         Permite riesgo escalonado segun confluencias.
         """
-        risk_amount = balance * (config.RISK_PERCENT / 100)
+        actual_risk = risk_percent if risk_percent is not None else config.RISK_PERCENT
+        risk_amount = balance * (actual_risk / 100)
 
         point = symbol_info.get("point", 0.01)
         contract_size = symbol_info.get("trade_contract_size", 100)
 
         if sl_distance_price is not None:
-            # ATR dinamico: la distancia ya esta en precio
-            # Valor monetario de la distancia por 1 lote
             value_per_lot = sl_distance_price * contract_size
         else:
-            # Pips fijos (fallback)
             pip_value_per_lot = point * 10 * contract_size
             value_per_lot = config.STOP_LOSS_PIPS * pip_value_per_lot
 
@@ -59,7 +60,7 @@ class RiskManager:
 
         sl_info = f"ATR dist={sl_distance_price:.2f}" if sl_distance_price else f"Fijo {config.STOP_LOSS_PIPS} pips"
         logger.info(f"Calculo de lote: Balance=${balance:.2f} | "
-                     f"Riesgo={config.RISK_PERCENT}% = ${risk_amount:.2f} | "
+                     f"Riesgo={actual_risk}% = ${risk_amount:.2f} | "
                      f"SL={sl_info} | Lote={lot_size}")
 
         return lot_size
