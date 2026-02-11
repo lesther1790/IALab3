@@ -77,38 +77,12 @@ class TradingAgent:
         self._run_loop()
 
     def _run_loop(self):
-        """Loop principal del agente."""
-        reconnect_attempts = 0
-        max_reconnect = 5
-
-        while True:
-            try:
-                self._tick()
-                reconnect_attempts = 0  # Reset si el tick fue exitoso
-                time.sleep(config.CHECK_INTERVAL_SECONDS)
-
-            except KeyboardInterrupt:
-                logger.info("Agente detenido por el usuario")
-                self.notifier.notify_status("Agente detenido manualmente")
-                break
-
-            except Exception as e:
-                logger.error(f"Error en loop principal: {e}", exc_info=True)
-                self.notifier.notify_error(str(e))
-
-                # Intentar reconexion
-                reconnect_attempts += 1
-                if reconnect_attempts >= max_reconnect:
-                    logger.critical("Maximo de intentos de reconexion alcanzado. Abortando.")
-                    self.notifier.notify_error("Agente detenido: maximo de reconexiones")
-                    break
-
-                logger.info(f"Esperando 30s antes de reconectar... "
-                             f"(intento {reconnect_attempts}/{max_reconnect})")
-                time.sleep(30)
-
-                if not self.mt5.reconnect():
-                    continue
+        """Ejecutar un solo ciclo del agente."""
+        try:
+            self._tick()
+        except Exception as e:
+            logger.error(f"Error en ejecucion: {e}", exc_info=True)
+            self.notifier.notify_error(str(e))
 
         self.mt5.disconnect()
 
