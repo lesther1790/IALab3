@@ -1,10 +1,17 @@
 """
-Backtest Engine - Motor de Backtesting para XAUUSD v1.0
+Backtest Engine - Motor de Backtesting para XAUUSD v2.0
 ========================================================
 Simula la estrategia sobre datos historicos para evaluar rendimiento.
 
+Mejoras v2.0:
+- Soporte para confluencias dinamicas (5-7)
+- Resampleo H1 a H4 para multi-timeframe
+- Soporte para sentimiento simulado (escenarios)
+- Desglose por nivel de confluencia extendido
+
 Uso:
-    python backtest.py
+    python backtest.py                         # Desde MT5
+    python backtest.py datos_xauusd_h1.csv     # Desde CSV
 
 Requiere datos historicos en formato CSV o conexion a MT5.
 """
@@ -26,13 +33,28 @@ logger = logging.getLogger(__name__)
 class BacktestEngine:
     """Motor de backtesting para evaluar la estrategia."""
 
-    def __init__(self, initial_balance: float = 10000.0):
+    def __init__(self, initial_balance: float = 10000.0,
+                 simulated_sentiment: dict = None):
+        """
+        Args:
+            initial_balance: Balance inicial para simulacion
+            simulated_sentiment: Dict con ajustes de sentimiento simulados
+                para probar escenarios. Ejemplo:
+                {
+                    "rsi_lower": 30, "rsi_upper": 70,
+                    "atr_sl_multiplier": 2.0, "atr_tp_multiplier": 6.0,
+                    "min_confluences": 3,
+                    "sentiment_confluence_buy": True,
+                    "sentiment_confluence_sell": False,
+                }
+        """
         self.strategy = Strategy()
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity_curve = []
         self.trades = []
         self.open_trade = None
+        self.simulated_sentiment = simulated_sentiment
 
     def run(self, df: pd.DataFrame) -> dict:
         """
@@ -50,31 +72,59 @@ class BacktestEngine:
         self.open_trade = None
 
         min_bars = config.EMA_SLOW + 20
+        if getattr(config, 'EMA_200_ENABLED', False):
+            min_bars = max(min_bars,
+                           getattr(config, 'EMA_200_PERIOD', 200) + 20)
+
         if len(df) < min_bars:
             logger.error(f"Datos insuficientes: {len(df)} barras (minimo {min_bars})")
             return {}
 
+        # Preparar datos H4 si MTF esta activo
+        df_h4 = None
+        if getattr(config, 'MTF_ENABLED', False):
+            df_h4 = self._resample_to_h4(df)
+            if df_h4 is not None:
+                print(f"MTF activo: {len(df_h4)} barras H4 generadas por resampleo")
+
+        # Info de features activos
+        features = []
+        if getattr(config, 'EMA_200_ENABLED', False):
+            features.append("EMA200")
+        if getattr(config, 'ADX_ENABLED', False):
+            features.append("ADX")
+        if getattr(config, 'MACD_ENABLED', False):
+            features.append("MACD")
+        if getattr(config, 'MTF_ENABLED', False):
+            features.append("MTF-H4")
+        if self.simulated_sentiment:
+            features.append("Sentiment(sim)")
+        features_str = ", ".join(features) if features else "Base"
+
         print(f"Iniciando backtest: {len(df)} barras | Balance: ${self.initial_balance:.2f}")
         print(f"Periodo: {df.iloc[0]['time']} a {df.iloc[-1]['time']}")
+        print(f"Features: {features_str}")
         print("-" * 60)
 
         # Simular barra por barra
         for i in range(min_bars, len(df)):
-            # Ventana de datos hasta la barra actual (inclusive)
             window = df.iloc[:i + 1].copy()
             current_bar = df.iloc[i]
 
-            # Gestionar trade abierto
             if self.open_trade is not None:
                 self._manage_trade(current_bar)
 
-            # Si no hay trade abierto, buscar senal
             if self.open_trade is None:
-                self._check_entry(window, current_bar)
+                df_htf_window = None
+                if df_h4 is not None and 'time' in window.columns:
+                    current_time = current_bar['time']
+                    df_htf_window = df_h4[df_h4['time'] <= current_time].copy()
+                    if df_htf_window.empty:
+                        df_htf_window = None
+                self._check_entry(window, current_bar, df_htf_window)
 
             self.equity_curve.append(self.balance + self._unrealized_pnl(current_bar))
 
-        # Cerrar trade abierto al final
         if self.open_trade is not None:
             self._close_trade(df.iloc[-1]['close'], "FIN_BACKTEST")
 
@@ -82,21 +132,46 @@ class BacktestEngine:
         self._print_report(metrics)
         return metrics
 
-    def _check_entry(self, window: pd.DataFrame, current_bar: pd.Series):
+    def _resample_to_h4(self, df_h1: pd.DataFrame) -> pd.DataFrame:
+        """Resamplear datos H1 a H4 para confirmacion multi-timeframe."""
+        if 'time' not in df_h1.columns:
+            return None
+        try:
+            df = df_h1.copy()
+            df = df.set_index('time')
+            h4 = df.resample('4h').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'tick_volume': 'sum'
+            }).dropna()
+            h4 = h4.reset_index()
+            return h4
+        except Exception as e:
+            logger.warning(f"Error resampleando a H4: {e}")
+            return None
+
+    def _check_entry(self, window: pd.DataFrame, current_bar: pd.Series,
+                     df_htf: pd.DataFrame = None):
         """Verificar si hay senal de entrada."""
-        # Suprimir logs de la estrategia durante backtest
         strategy_logger = logging.getLogger('strategy')
         prev_level = strategy_logger.level
         strategy_logger.setLevel(logging.CRITICAL)
 
         try:
-            result = self.strategy.check_signal(window)
+            result = self.strategy.check_signal(
+                window,
+                df_htf=df_htf,
+                sentiment_adjustments=self.simulated_sentiment
+            )
         finally:
             strategy_logger.setLevel(prev_level)
 
         signal = result["signal"]
         atr_levels = result["atr_levels"]
         confluences_met = result.get("confluences_met", 5)
+        total_confluences = result.get("total_confluences", 5)
         risk_percent = result.get("risk_percent", config.RISK_PERCENT)
 
         if signal == "NONE":
@@ -104,12 +179,11 @@ class BacktestEngine:
 
         entry_price = current_bar['close']
 
-        # Calcular SL/TP
         if atr_levels is not None:
             sl_distance = atr_levels["sl_distance"]
             tp_distance = atr_levels["tp_distance"]
         else:
-            sl_distance = config.STOP_LOSS_PIPS * 0.01 * 10  # pips -> precio para XAUUSD
+            sl_distance = config.STOP_LOSS_PIPS * 0.01 * 10
             tp_distance = config.TAKE_PROFIT_PIPS * 0.01 * 10
 
         if signal == "BUY":
@@ -119,9 +193,8 @@ class BacktestEngine:
             sl = entry_price + sl_distance
             tp = entry_price - tp_distance
 
-        # Calcular lotaje con riesgo escalonado
         risk_amount = self.balance * (risk_percent / 100)
-        contract_size = 100  # XAUUSD estandar
+        contract_size = 100
         value_per_lot = sl_distance * contract_size
         lot_size = risk_amount / value_per_lot if value_per_lot > 0 else 0.01
         lot_size = max(0.01, round(lot_size, 2))
@@ -136,6 +209,7 @@ class BacktestEngine:
             "sl_distance": sl_distance,
             "be_activated": False,
             "confluences": confluences_met,
+            "total_confluences": total_confluences,
             "risk_percent": risk_percent,
         }
 
@@ -144,39 +218,28 @@ class BacktestEngine:
         trade = self.open_trade
 
         if trade["type"] == "BUY":
-            # Verificar SL (low toca o cruza SL)
             if bar['low'] <= trade["sl"]:
                 self._close_trade(trade["sl"], "SL")
                 return
-
-            # Verificar TP (high toca o cruza TP)
             if bar['high'] >= trade["tp"]:
                 self._close_trade(trade["tp"], "TP")
                 return
-
-            # Break Even
             current_profit_distance = bar['high'] - trade["entry_price"]
             be_distance = config.BREAK_EVEN_PIPS * 0.01 * 10
             if (not trade["be_activated"] and current_profit_distance >= be_distance):
-                trade["sl"] = trade["entry_price"] + 0.1  # +1 pip
+                trade["sl"] = trade["entry_price"] + 0.1
                 trade["be_activated"] = True
-
-        else:  # SELL
-            # Verificar SL
+        else:
             if bar['high'] >= trade["sl"]:
                 self._close_trade(trade["sl"], "SL")
                 return
-
-            # Verificar TP
             if bar['low'] <= trade["tp"]:
                 self._close_trade(trade["tp"], "TP")
                 return
-
-            # Break Even
             current_profit_distance = trade["entry_price"] - bar['low']
             be_distance = config.BREAK_EVEN_PIPS * 0.01 * 10
             if (not trade["be_activated"] and current_profit_distance >= be_distance):
-                trade["sl"] = trade["entry_price"] - 0.1  # -1 pip
+                trade["sl"] = trade["entry_price"] - 0.1
                 trade["be_activated"] = True
 
     def _close_trade(self, exit_price: float, reason: str):
@@ -190,7 +253,6 @@ class BacktestEngine:
 
         contract_size = 100
         pnl = pnl_per_unit * trade["lot_size"] * contract_size
-
         self.balance += pnl
 
         trade_record = {
@@ -200,10 +262,11 @@ class BacktestEngine:
             "entry_time": trade["entry_time"],
             "lot_size": trade["lot_size"],
             "pnl": round(pnl, 2),
-            "pnl_pips": round(pnl_per_unit / 0.1, 1),  # pips para XAUUSD
+            "pnl_pips": round(pnl_per_unit / 0.1, 1),
             "reason": reason,
             "be_activated": trade["be_activated"],
             "confluences": trade.get("confluences", 5),
+            "total_confluences": trade.get("total_confluences", 5),
             "risk_percent": trade.get("risk_percent", config.RISK_PERCENT),
         }
 
@@ -214,16 +277,13 @@ class BacktestEngine:
         """Calcular PnL no realizado del trade abierto."""
         if self.open_trade is None:
             return 0.0
-
         trade = self.open_trade
         current_price = bar['close']
         contract_size = 100
-
         if trade["type"] == "BUY":
             pnl = (current_price - trade["entry_price"]) * trade["lot_size"] * contract_size
         else:
             pnl = (trade["entry_price"] - current_price) * trade["lot_size"] * contract_size
-
         return pnl
 
     def _calculate_metrics(self) -> dict:
@@ -244,7 +304,6 @@ class BacktestEngine:
         win_rate = len(wins) / len(self.trades) * 100 if self.trades else 0
         profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
 
-        # Drawdown
         equity = pd.Series(self.equity_curve)
         running_max = equity.cummax()
         drawdown = equity - running_max
@@ -254,7 +313,6 @@ class BacktestEngine:
         net_profit = self.balance - self.initial_balance
         roi = (net_profit / self.initial_balance) * 100
 
-        # Racha maxima
         streaks = []
         current_streak = 0
         for t in self.trades:
@@ -270,14 +328,13 @@ class BacktestEngine:
         avg_win = total_profit / len(wins) if wins else 0
         avg_loss = total_loss / len(losses) if losses else 0
 
-        # Trades por motivo de cierre
         tp_trades = len([t for t in self.trades if t["reason"] == "TP"])
         sl_trades = len([t for t in self.trades if t["reason"] == "SL"])
         be_activated = len([t for t in self.trades if t["be_activated"]])
 
-        # Desglose por confluencias
+        # Desglose por confluencias (rango extendido 3-7)
         by_confluences = {}
-        for conf_level in [3, 4, 5]:
+        for conf_level in range(3, 8):
             conf_trades = [t for t in self.trades if t.get("confluences", 5) == conf_level]
             if conf_trades:
                 conf_wins = [t for t in conf_trades if t["pnl"] > 0]
@@ -320,7 +377,7 @@ class BacktestEngine:
         """Imprimir reporte de rendimiento."""
         if metrics.get("total_trades", 0) == 0:
             print("\nSin trades generados en el periodo de prueba.")
-            print("Esto es normal con una estrategia de 5 confluencias muy selectiva.")
+            print("Esto es normal con una estrategia de multiples confluencias muy selectiva.")
             print("Considera ampliar el periodo de datos o relajar los filtros.")
             return
 
@@ -353,14 +410,17 @@ class BacktestEngine:
         print(f"  Por Stop Loss:     {metrics['sl_closures']}")
         print(f"  BE activado:       {metrics['be_activations']} trades")
 
-        # Desglose por confluencias
         by_conf = metrics.get("by_confluences", {})
         if by_conf:
             print(f"\n--- DESGLOSE POR CONFLUENCIAS ---")
             for level in sorted(by_conf.keys(), reverse=True):
                 data = by_conf[level]
-                label = {5: "MAXIMA", 4: "ALTA", 3: "MODERADA"}.get(level, str(level))
-                print(f"  {level}/5 ({label}, {data['risk_percent']}%): "
+                label = {
+                    7: "EXCEPCIONAL+", 6: "EXCEPCIONAL",
+                    5: "MAXIMA", 4: "ALTA", 3: "MODERADA"
+                }.get(level, str(level))
+                total_conf = self.trades[0].get("total_confluences", 5) if self.trades else 5
+                print(f"  {level}/{total_conf} ({label}, {data['risk_percent']}%): "
                       f"{data['trades']} trades | "
                       f"W:{data['wins']} L:{data['losses']} | "
                       f"WR:{data['win_rate']}% | "
@@ -368,7 +428,6 @@ class BacktestEngine:
 
         print("=" * 60)
 
-        # Evaluacion
         if metrics['profit_factor'] >= 1.5 and metrics['win_rate'] >= 40:
             print("EVALUACION: Estrategia RENTABLE")
         elif metrics['profit_factor'] >= 1.0:
@@ -400,11 +459,11 @@ def run_backtest_from_mt5():
         mt5.shutdown()
         return
 
-    # Obtener 6 meses de datos H1
     tf_map = {"H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4, "D1": mt5.TIMEFRAME_D1}
     mt5_tf = tf_map.get(config.TIMEFRAME, mt5.TIMEFRAME_H1)
 
-    rates = mt5.copy_rates_from_pos(config.SYMBOL, mt5_tf, 0, 4380)  # ~6 meses H1
+    candle_count = 6000 if getattr(config, 'EMA_200_ENABLED', False) else 4380
+    rates = mt5.copy_rates_from_pos(config.SYMBOL, mt5_tf, 0, candle_count)
 
     mt5.shutdown()
 
@@ -424,7 +483,6 @@ def run_backtest_from_mt5():
 def run_backtest_from_csv(filepath: str):
     """
     Ejecutar backtest desde archivo CSV.
-
     El CSV debe tener columnas: time, open, high, low, close, tick_volume
     """
     try:
@@ -455,8 +513,6 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1:
-        # Backtest desde CSV
         run_backtest_from_csv(sys.argv[1])
     else:
-        # Backtest desde MT5
         run_backtest_from_mt5()

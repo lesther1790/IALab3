@@ -69,3 +69,18 @@ class Notifier:
     def notify_status(self, message: str):
         """Notificar estado general."""
         self.send(f"ℹ️ {message}")
+
+    def notify_sentiment_change(self, old_label: str, new_label: str, score: float):
+        """Notificar cambio de sentimiento del mercado."""
+        emoji_map = {
+            "BULLISH": "🟢",
+            "BEARISH": "🔴",
+            "NEUTRAL": "🟡",
+            "UNKNOWN": "⚪"
+        }
+        msg = (
+            f"{emoji_map.get(new_label, '?')} <b>Cambio de Sentimiento</b>\n"
+            f"Anterior: {old_label}\n"
+            f"Actual: {new_label} ({score:+.1f})\n"
+        )
+        self.send(msg)

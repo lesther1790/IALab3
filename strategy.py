@@ -1,14 +1,24 @@
 """
-Estrategia de Trading - XAUUSD Trend Following + Smart Money + Fibonacci OTE v2.0
+Estrategia de Trading - XAUUSD Trend Following + Smart Money + Fibonacci OTE v3.0
 ===================================================================================
-Confluencias requeridas (5/5):
+Confluencias base (5):
 1. Tendencia: EMA 21/50
 2. RSI en zona neutra (35-65)
 3. Pullback a EMA 21 (multi-vela)
 4. Liquidity Sweep estructural confirma direccion
 5. Precio en zona OTE de Fibonacci (61.8% - 78.6%) con validacion temporal
 
-Mejoras v2.0:
+Confluencias opcionales:
+6. MACD momentum (histograma alineado con direccion)
+7. Sentimiento de internet (via TrendAnalyzer)
+
+Filtros adicionales v3.0:
+- EMA 200 como filtro de tendencia de largo plazo
+- ADX como filtro de fuerza de tendencia
+- Confirmacion multi-timeframe (H4)
+- Ajuste dinamico de parametros via sentimiento de internet
+
+Mejoras v2.0 (mantenidas):
 - ATR dinamico para SL/TP adaptativo a volatilidad
 - Liquidity Sweep mejorado: busca niveles estructurales (N velas)
 - Pullback multi-vela (hasta 5 velas)
@@ -27,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 
 class Strategy:
-    """Estrategia Trend Following + Smart Money + Fibonacci OTE para XAUUSD v2.0."""
+    """Estrategia Trend Following + Smart Money + Fibonacci OTE para XAUUSD v3.0."""
 
     def __init__(self):
-        self.name = "XAUUSD Trend Following + Liquidity Sweep + Fibonacci OTE v2.0"
+        self.name = "XAUUSD Trend Following + Liquidity Sweep + Fibonacci OTE v3.0"
         self.fractal_lookback = 5  # Velas a cada lado para detectar fractales
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -41,11 +51,25 @@ class Strategy:
         df['ema_fast'] = df['close'].ewm(span=config.EMA_FAST, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=config.EMA_SLOW, adjust=False).mean()
 
+        # EMA 200 (filtro de largo plazo)
+        if getattr(config, 'EMA_200_ENABLED', False):
+            df['ema_200'] = df['close'].ewm(
+                span=getattr(config, 'EMA_200_PERIOD', 200), adjust=False
+            ).mean()
+
         # RSI (con proteccion contra division por cero)
         df['rsi'] = self._calculate_rsi(df['close'], config.RSI_PERIOD)
 
         # ATR (Average True Range)
         df['atr'] = self._calculate_atr(df, config.ATR_PERIOD)
+
+        # ADX (fuerza de tendencia)
+        if getattr(config, 'ADX_ENABLED', False):
+            df['adx'] = self._calculate_adx(df, getattr(config, 'ADX_PERIOD', 14))
+
+        # MACD (confluencia de momentum)
+        if getattr(config, 'MACD_ENABLED', False):
+            df['macd'], df['macd_signal'], df['macd_histogram'] = self._calculate_macd(df['close'])
 
         # Tendencia (EMA rapida vs lenta)
         df['trend'] = np.where(df['ema_fast'] > df['ema_slow'], 'BULLISH', 'BEARISH')
@@ -78,6 +102,51 @@ class Strategy:
         atr = true_range.ewm(span=period, adjust=False).mean()
 
         return atr
+
+    def _calculate_adx(self, df: pd.DataFrame, period: int) -> pd.Series:
+        """Calcular Average Directional Index (ADX)."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+
+        # +DM y -DM
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        # ATR para ADX
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.ewm(span=period, adjust=False).mean()
+
+        # +DI y -DI suavizados
+        atr_safe = atr.replace(0, np.nan)
+        plus_di = 100 * (plus_dm.ewm(span=period, adjust=False).mean() / atr_safe)
+        minus_di = 100 * (minus_dm.ewm(span=period, adjust=False).mean() / atr_safe)
+
+        # DX y ADX
+        di_sum = (plus_di + minus_di).replace(0, np.nan)
+        dx = ((plus_di - minus_di).abs() / di_sum) * 100
+        adx = dx.ewm(span=period, adjust=False).mean()
+
+        return adx
+
+    def _calculate_macd(self, prices: pd.Series) -> tuple:
+        """Calcular MACD, Signal Line y Histogram."""
+        fast = getattr(config, 'MACD_FAST', 12)
+        slow = getattr(config, 'MACD_SLOW', 26)
+        signal_period = getattr(config, 'MACD_SIGNAL', 9)
+
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+        histogram = macd_line - signal_line
+
+        return macd_line, signal_line, histogram
 
     def _detect_pullback_buy(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -274,7 +343,7 @@ class Strategy:
             # (el precio subio, hizo techo, ahora retrocede)
             if swing_high_idx is not None and swing_low_idx is not None:
                 if swing_high_idx <= swing_low_idx:
-                    logger.info("📐 Fibonacci BUY: Secuencia temporal invalida "
+                    logger.info("Fibonacci BUY: Secuencia temporal invalida "
                                 f"(swing_high_idx={swing_high_idx} <= swing_low_idx={swing_low_idx})")
                     return {"in_ote": False, "fib_level": None, "zone_low": None, "zone_high": None}
 
@@ -300,7 +369,7 @@ class Strategy:
             # (el precio bajo, hizo piso, ahora retrocede hacia arriba)
             if swing_high_idx is not None and swing_low_idx is not None:
                 if swing_low_idx <= swing_high_idx:
-                    logger.info("📐 Fibonacci SELL: Secuencia temporal invalida "
+                    logger.info("Fibonacci SELL: Secuencia temporal invalida "
                                 f"(swing_low_idx={swing_low_idx} <= swing_high_idx={swing_high_idx})")
                     return {"in_ote": False, "fib_level": None, "zone_low": None, "zone_high": None}
 
@@ -321,7 +390,7 @@ class Strategy:
             fib_level = (current_price - swing_low) / swing_range
 
         logger.info(
-            f"📐 Fibonacci: Swing H={swing_high:.2f} (idx={swing_high_idx}) | "
+            f"Fibonacci: Swing H={swing_high:.2f} (idx={swing_high_idx}) | "
             f"Swing L={swing_low:.2f} (idx={swing_low_idx}) | "
             f"OTE Zone=[{zone_low:.2f} - {zone_high:.2f}] | "
             f"Precio={current_price:.2f} | Fib={fib_level:.3f} | "
@@ -360,22 +429,24 @@ class Strategy:
 
         if atr_ratio > max_ratio:
             logger.info(
-                f"⚠️ Volatilidad excesiva: ATR={current_atr:.2f} | "
+                f"Volatilidad excesiva: ATR={current_atr:.2f} | "
                 f"ATR_SMA50={atr_sma_50:.2f} | Ratio={atr_ratio:.2f} > {max_ratio}"
             )
             return False
 
         logger.info(
-            f"📊 Volatilidad OK: ATR={current_atr:.2f} | "
+            f"Volatilidad OK: ATR={current_atr:.2f} | "
             f"ATR_SMA50={atr_sma_50:.2f} | Ratio={atr_ratio:.2f}"
         )
         return True
 
-    def get_dynamic_sl_tp(self, df: pd.DataFrame, direction: str) -> dict:
+    def get_dynamic_sl_tp(self, df: pd.DataFrame, direction: str,
+                          atr_sl_mult: float = None, atr_tp_mult: float = None) -> dict:
         """
         Calcular SL/TP dinamico basado en ATR.
         Retorna distancias en precio (no pips).
         Si USE_DYNAMIC_SL_TP es False, retorna None para usar pips fijos.
+        Acepta multiplicadores personalizados (ej. ajustados por sentimiento).
         """
         if not getattr(config, 'USE_DYNAMIC_SL_TP', False):
             return None
@@ -388,14 +459,17 @@ class Strategy:
         if pd.isna(current_atr) or current_atr <= 0:
             return None
 
-        sl_distance = current_atr * config.ATR_SL_MULTIPLIER
-        tp_distance = current_atr * config.ATR_TP_MULTIPLIER
+        sl_multiplier = atr_sl_mult if atr_sl_mult is not None else config.ATR_SL_MULTIPLIER
+        tp_multiplier = atr_tp_mult if atr_tp_mult is not None else config.ATR_TP_MULTIPLIER
+
+        sl_distance = current_atr * sl_multiplier
+        tp_distance = current_atr * tp_multiplier
 
         logger.info(
-            f"📐 ATR Dinamico: ATR={current_atr:.2f} | "
-            f"SL={sl_distance:.2f} ({config.ATR_SL_MULTIPLIER}x) | "
-            f"TP={tp_distance:.2f} ({config.ATR_TP_MULTIPLIER}x) | "
-            f"Ratio=1:{config.ATR_TP_MULTIPLIER / config.ATR_SL_MULTIPLIER:.1f}"
+            f"ATR Dinamico: ATR={current_atr:.2f} | "
+            f"SL={sl_distance:.2f} ({sl_multiplier}x) | "
+            f"TP={tp_distance:.2f} ({tp_multiplier}x) | "
+            f"Ratio=1:{tp_multiplier / sl_multiplier:.1f}"
         )
 
         return {
@@ -404,45 +478,100 @@ class Strategy:
             "atr": round(current_atr, 2),
         }
 
-    def check_signal(self, df: pd.DataFrame) -> dict:
+    def check_higher_timeframe_trend(self, df_htf: pd.DataFrame) -> str:
         """
-        Verificar si hay senal de trading con sistema escalonado.
+        Verificar tendencia en timeframe superior (ej. H4).
+        Returns: 'BULLISH', 'BEARISH', o 'UNKNOWN'
+        """
+        if df_htf is None or df_htf.empty:
+            return 'UNKNOWN'
 
-        Confluencias evaluadas (5):
+        min_bars = getattr(config, 'MTF_EMA_SLOW', 50) + 5
+        if len(df_htf) < min_bars:
+            return 'UNKNOWN'
+
+        ema_fast = df_htf['close'].ewm(
+            span=getattr(config, 'MTF_EMA_FAST', 21), adjust=False
+        ).mean()
+        ema_slow = df_htf['close'].ewm(
+            span=getattr(config, 'MTF_EMA_SLOW', 50), adjust=False
+        ).mean()
+
+        last_fast = ema_fast.iloc[-2]
+        last_slow = ema_slow.iloc[-2]
+
+        if pd.isna(last_fast) or pd.isna(last_slow):
+            return 'UNKNOWN'
+
+        return 'BULLISH' if last_fast > last_slow else 'BEARISH'
+
+    def check_signal(self, df: pd.DataFrame, df_htf: pd.DataFrame = None,
+                     sentiment_adjustments: dict = None) -> dict:
+        """
+        Verificar si hay senal de trading con sistema escalonado v3.0.
+
+        Confluencias base (5):
         1. Tendencia (EMA 21 vs EMA 50) - OBLIGATORIA
-        2. RSI en zona neutra (35-65)
+        2. RSI en zona neutra
         3. Pullback a EMA 21 (multi-vela)
         4. Liquidity sweep estructural confirma direccion
         5. Precio en zona OTE Fibonacci (61.8% - 78.6%) con validacion temporal
 
-        Modo escalonado (TIERED_RISK_ENABLED=True):
-            5/5 confluencias -> riesgo 0.75% (confianza maxima)
-            4/5 confluencias -> riesgo 0.50% (confianza alta)
-            3/5 confluencias -> riesgo 0.25% (confianza moderada)
-            La tendencia siempre debe cumplirse.
+        Confluencias opcionales:
+        6. MACD momentum (si MACD_ENABLED)
+        7. Sentimiento de internet (si SENTIMENT_AS_CONFLUENCE)
 
-        Modo clasico (TIERED_RISK_ENABLED=False):
-            Solo opera con 5/5 confluencias al riesgo fijo.
+        Filtros (rechazan senal si no pasan):
+        - Volatilidad excesiva (ATR)
+        - EMA 200 largo plazo (si EMA_200_ENABLED)
+        - ADX fuerza de tendencia (si ADX_ENABLED)
+        - Multi-timeframe H4 (si MTF_ENABLED)
 
         Returns:
             dict con:
                 "signal": "BUY", "SELL", o "NONE"
                 "atr_levels": dict con SL/TP dinamicos o None
                 "confluences_met": int (cuantas confluencias se cumplieron)
+                "total_confluences": int (total de confluencias evaluadas)
                 "confluences_detail": dict detalle de cada confluencia
                 "risk_percent": float riesgo asignado segun confluencias
         """
         no_signal = {
             "signal": "NONE", "atr_levels": None,
-            "confluences_met": 0, "confluences_detail": {},
-            "risk_percent": 0
+            "confluences_met": 0, "total_confluences": 5,
+            "confluences_detail": {}, "risk_percent": 0
         }
 
-        if len(df) < config.EMA_SLOW + 10:
+        # Minimo de velas requeridas
+        min_candles = config.EMA_SLOW + 10
+        if getattr(config, 'EMA_200_ENABLED', False):
+            min_candles = max(min_candles, getattr(config, 'EMA_200_PERIOD', 200) + 10)
+
+        if len(df) < min_candles:
             logger.warning("No hay suficientes velas para calcular indicadores")
             return no_signal
 
         df = self.calculate_indicators(df)
+
+        # ========== PARAMETROS EFECTIVOS (con posible ajuste de sentimiento) ==========
+        eff_rsi_lower = config.RSI_LOWER
+        eff_rsi_upper = config.RSI_UPPER
+        eff_atr_sl_mult = config.ATR_SL_MULTIPLIER
+        eff_atr_tp_mult = config.ATR_TP_MULTIPLIER
+        eff_min_conf = getattr(config, 'MIN_CONFLUENCES', 3)
+
+        if sentiment_adjustments:
+            eff_rsi_lower = sentiment_adjustments.get("rsi_lower", eff_rsi_lower)
+            eff_rsi_upper = sentiment_adjustments.get("rsi_upper", eff_rsi_upper)
+            eff_atr_sl_mult = sentiment_adjustments.get("atr_sl_multiplier", eff_atr_sl_mult)
+            eff_atr_tp_mult = sentiment_adjustments.get("atr_tp_multiplier", eff_atr_tp_mult)
+            eff_min_conf = sentiment_adjustments.get("min_confluences", eff_min_conf)
+            logger.info(
+                f"Parametros ajustados por sentimiento: RSI=[{eff_rsi_lower}-{eff_rsi_upper}] | "
+                f"ATR SL={eff_atr_sl_mult}x TP={eff_atr_tp_mult}x | MinConf={eff_min_conf}"
+            )
+
+        # ========== FILTROS (rechazan senal si no pasan) ==========
 
         # Filtro de volatilidad
         if not self.check_volatility_filter(df):
@@ -453,6 +582,36 @@ class Strategy:
 
         current_trend = last['trend']
         current_rsi = last['rsi']
+
+        # Filtro EMA 200 de largo plazo
+        if getattr(config, 'EMA_200_ENABLED', False) and 'ema_200' in df.columns:
+            ema200_value = last.get('ema_200')
+            if ema200_value is not None and not pd.isna(ema200_value):
+                price_above_200 = last['close'] > ema200_value
+                logger.info(
+                    f"EMA200 Filtro: EMA200={ema200_value:.2f} | "
+                    f"Price={'ABOVE' if price_above_200 else 'BELOW'}"
+                )
+            else:
+                price_above_200 = None
+        else:
+            price_above_200 = None  # No aplica filtro
+
+        # Filtro ADX de fuerza de tendencia
+        if getattr(config, 'ADX_ENABLED', False) and 'adx' in df.columns:
+            current_adx = last.get('adx')
+            if current_adx is not None and not pd.isna(current_adx):
+                adx_threshold = getattr(config, 'ADX_MIN_THRESHOLD', 25)
+                logger.info(f"ADX Filtro: ADX={current_adx:.1f} | Threshold={adx_threshold}")
+                if current_adx < adx_threshold:
+                    logger.info(f"Tendencia debil: ADX={current_adx:.1f} < {adx_threshold}")
+                    return no_signal
+
+        # Filtro Multi-Timeframe
+        htf_trend = None
+        if getattr(config, 'MTF_ENABLED', False) and df_htf is not None:
+            htf_trend = self.check_higher_timeframe_trend(df_htf)
+            logger.info(f"MTF Filtro: H4 Trend={htf_trend}")
 
         # Log de analisis general
         atr_value = last['atr'] if not pd.isna(last['atr']) else 0
@@ -468,8 +627,16 @@ class Strategy:
             f"Pullback Sell={last['pullback_sell']}"
         )
 
+        # ========== CALCULAR TOTAL DE CONFLUENCIAS ==========
+        total_confluences = 5
+        if getattr(config, 'MACD_ENABLED', False):
+            total_confluences += 1
+        if sentiment_adjustments and getattr(config, 'SENTIMENT_AS_CONFLUENCE', False):
+            total_confluences += 1
+
+        no_signal["total_confluences"] = total_confluences
+
         tiered = getattr(config, 'TIERED_RISK_ENABLED', False)
-        min_conf = getattr(config, 'MIN_CONFLUENCES', 5)
         risk_map = getattr(config, 'RISK_BY_CONFLUENCES', {5: config.RISK_PERCENT})
 
         # ========== EVALUAR COMPRA ==========
@@ -477,31 +644,56 @@ class Strategy:
 
         buy_conditions = {
             "tendencia": current_trend == 'BULLISH',
-            "rsi": config.RSI_LOWER <= current_rsi <= config.RSI_UPPER,
+            "rsi": eff_rsi_lower <= current_rsi <= eff_rsi_upper,
             "pullback": bool(last['pullback_buy']),
             "liquidity": bool(last['sweep_low']),
             "fibonacci_ote": fib_buy["in_ote"],
         }
 
+        # MACD como confluencia opcional
+        if getattr(config, 'MACD_ENABLED', False) and 'macd_histogram' in df.columns:
+            macd_hist = last.get('macd_histogram')
+            buy_conditions["macd_momentum"] = (
+                macd_hist is not None and not pd.isna(macd_hist) and macd_hist > 0
+            )
+
+        # Sentimiento como confluencia opcional
+        if sentiment_adjustments and getattr(config, 'SENTIMENT_AS_CONFLUENCE', False):
+            buy_conditions["sentiment"] = sentiment_adjustments.get(
+                "sentiment_confluence_buy", False
+            )
+
         buy_met = sum(buy_conditions.values())
-        logger.info(f"Compra ({buy_met}/5): {buy_conditions}")
+        logger.info(f"Compra ({buy_met}/{total_confluences}): {buy_conditions}")
 
         # ========== EVALUAR VENTA ==========
         fib_sell = self._check_fibonacci_ote(df, "SELL")
 
         sell_conditions = {
             "tendencia": current_trend == 'BEARISH',
-            "rsi": config.RSI_LOWER <= current_rsi <= config.RSI_UPPER,
+            "rsi": eff_rsi_lower <= current_rsi <= eff_rsi_upper,
             "pullback": bool(last['pullback_sell']),
             "liquidity": bool(last['sweep_high']),
             "fibonacci_ote": fib_sell["in_ote"],
         }
 
+        # MACD como confluencia opcional
+        if getattr(config, 'MACD_ENABLED', False) and 'macd_histogram' in df.columns:
+            macd_hist = last.get('macd_histogram')
+            sell_conditions["macd_momentum"] = (
+                macd_hist is not None and not pd.isna(macd_hist) and macd_hist < 0
+            )
+
+        # Sentimiento como confluencia opcional
+        if sentiment_adjustments and getattr(config, 'SENTIMENT_AS_CONFLUENCE', False):
+            sell_conditions["sentiment"] = sentiment_adjustments.get(
+                "sentiment_confluence_sell", False
+            )
+
         sell_met = sum(sell_conditions.values())
-        logger.info(f"Venta ({sell_met}/5): {sell_conditions}")
+        logger.info(f"Venta ({sell_met}/{total_confluences}): {sell_conditions}")
 
         # ========== DETERMINAR MEJOR SENAL ==========
-        # Priorizar la direccion con mas confluencias
         best_signal = "NONE"
         best_met = 0
         best_conditions = {}
@@ -514,11 +706,11 @@ class Strategy:
             best_signal = "SELL"
             best_met = sell_met
             best_conditions = sell_conditions
-        elif buy_conditions["tendencia"] and buy_met >= min_conf:
+        elif buy_conditions["tendencia"] and buy_met >= eff_min_conf:
             best_signal = "BUY"
             best_met = buy_met
             best_conditions = buy_conditions
-        elif sell_conditions["tendencia"] and sell_met >= min_conf:
+        elif sell_conditions["tendencia"] and sell_met >= eff_min_conf:
             best_signal = "SELL"
             best_met = sell_met
             best_conditions = sell_conditions
@@ -528,16 +720,36 @@ class Strategy:
             logger.info("Sin senal - tendencia no confirmada")
             return no_signal
 
+        # Filtro EMA 200: rechazar si la senal va contra la tendencia de largo plazo
+        if price_above_200 is not None:
+            if best_signal == "BUY" and not price_above_200:
+                logger.info("Senal BUY rechazada: precio por debajo de EMA200")
+                return no_signal
+            elif best_signal == "SELL" and price_above_200:
+                logger.info("Senal SELL rechazada: precio por encima de EMA200")
+                return no_signal
+
+        # Filtro MTF: rechazar si H4 no coincide
+        if htf_trend is not None and htf_trend != 'UNKNOWN':
+            if best_signal == "BUY" and htf_trend != 'BULLISH':
+                logger.info(f"Senal BUY rechazada: H4 trend es {htf_trend}")
+                return no_signal
+            elif best_signal == "SELL" and htf_trend != 'BEARISH':
+                logger.info(f"Senal SELL rechazada: H4 trend es {htf_trend}")
+                return no_signal
+
         # Verificar minimo de confluencias
         if tiered:
-            required = min_conf
+            required = eff_min_conf
         else:
-            required = 5  # Modo clasico: solo 5/5
+            required = total_confluences  # Modo clasico: todas las confluencias
 
         if best_met < required:
             if best_met >= 3:
-                logger.info(f"Senal {best_signal} descartada: {best_met}/5 confluencias "
-                            f"(minimo requerido: {required})")
+                logger.info(
+                    f"Senal {best_signal} descartada: {best_met}/{total_confluences} confluencias "
+                    f"(minimo requerido: {required})"
+                )
             else:
                 logger.info("Sin senal")
             return no_signal
@@ -545,16 +757,28 @@ class Strategy:
         # Calcular riesgo segun confluencias
         risk_percent = risk_map.get(best_met, 0)
         if risk_percent <= 0:
+            # Buscar el nivel mas cercano inferior
+            for level in sorted(risk_map.keys(), reverse=True):
+                if best_met >= level:
+                    risk_percent = risk_map[level]
+                    break
+        if risk_percent <= 0:
             logger.info(f"Sin riesgo asignado para {best_met} confluencias")
             return no_signal
 
-        # Obtener ATR levels
-        atr_levels = self.get_dynamic_sl_tp(df, best_signal)
+        # Obtener ATR levels (con multiplicadores ajustados por sentimiento)
+        atr_levels = self.get_dynamic_sl_tp(
+            df, best_signal,
+            atr_sl_mult=eff_atr_sl_mult,
+            atr_tp_mult=eff_atr_tp_mult
+        )
 
-        conf_label = "MAXIMA" if best_met == 5 else "ALTA" if best_met == 4 else "MODERADA"
+        conf_label = ("EXCEPCIONAL" if best_met >= 6 else
+                       "MAXIMA" if best_met == 5 else
+                       "ALTA" if best_met == 4 else "MODERADA")
         logger.info(
             f"SENAL DE {'COMPRA' if best_signal == 'BUY' else 'VENTA'} - "
-            f"{best_met}/5 confluencias | Confianza {conf_label} | "
+            f"{best_met}/{total_confluences} confluencias | Confianza {conf_label} | "
             f"Riesgo={risk_percent}%"
         )
 
@@ -562,6 +786,7 @@ class Strategy:
             "signal": best_signal,
             "atr_levels": atr_levels,
             "confluences_met": best_met,
+            "total_confluences": total_confluences,
             "confluences_detail": best_conditions,
             "risk_percent": risk_percent,
         }
@@ -616,7 +841,7 @@ class Strategy:
 
         atr_value = last['atr'] if not pd.isna(last['atr']) else 0
 
-        return {
+        summary = {
             "trend": last['trend'],
             "ema_fast": round(last['ema_fast'], 2),
             "ema_slow": round(last['ema_slow'], 2),
@@ -632,3 +857,18 @@ class Strategy:
             "fib_buy_level": fib_buy["fib_level"],
             "fib_sell_level": fib_sell["fib_level"],
         }
+
+        # Indicadores opcionales
+        if getattr(config, 'EMA_200_ENABLED', False) and 'ema_200' in df.columns:
+            ema200_val = last.get('ema_200')
+            summary["ema_200"] = round(ema200_val, 2) if ema200_val and not pd.isna(ema200_val) else None
+
+        if getattr(config, 'ADX_ENABLED', False) and 'adx' in df.columns:
+            adx_val = last.get('adx')
+            summary["adx"] = round(adx_val, 1) if adx_val and not pd.isna(adx_val) else None
+
+        if getattr(config, 'MACD_ENABLED', False) and 'macd_histogram' in df.columns:
+            macd_val = last.get('macd_histogram')
+            summary["macd_histogram"] = round(macd_val, 2) if macd_val and not pd.isna(macd_val) else None
+
+        return summary
