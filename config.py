@@ -22,11 +22,11 @@ TIMEFRAME = "H1"                  # Temporalidad principal
 # GESTIÓN DE RIESGO
 # ============================================
 
-RISK_PERCENT = 0.75               # % del capital con 5/5 confluencias (riesgo maximo)
-STOP_LOSS_PIPS = 20              # Stop Loss en pips (fallback si ATR no disponible)
-TAKE_PROFIT_PIPS = 60            # Take Profit en pips (fallback si ATR no disponible)
-MAX_OPEN_TRADES = 3              # Maximo de trades abiertos simultaneamente
-MARGIN_SAFETY_FACTOR = 1.5       # Factor de seguridad para margen libre (1.5x margen requerido)
+RISK_PERCENT = 0.50               # % del capital con 5/5 confluencias (reducido por alta volatilidad)
+STOP_LOSS_PIPS = 35              # Stop Loss en pips (fallback - ajustado a gold ~$4900)
+TAKE_PROFIT_PIPS = 90            # Take Profit en pips (fallback - ratio ~1:2.5)
+MAX_OPEN_TRADES = 2              # Maximo de trades abiertos (reducido por alta volatilidad)
+MARGIN_SAFETY_FACTOR = 2.0       # Factor de seguridad para margen libre (aumentado por volatilidad)
 
 # ============================================
 # RIESGO ESCALONADO POR CONFLUENCIAS
@@ -35,13 +35,13 @@ MARGIN_SAFETY_FACTOR = 1.5       # Factor de seguridad para margen libre (1.5x m
 # Confluencias: tendencia, rsi, pullback, liquidity, fibonacci_ote
 # La tendencia es OBLIGATORIA siempre (no se opera contra tendencia).
 TIERED_RISK_ENABLED = True        # Activar sistema escalonado (False = solo 5/5 como antes)
-MIN_CONFLUENCES = 3               # Minimo de confluencias para abrir trade
+MIN_CONFLUENCES = 4               # Minimo de confluencias para abrir trade (subido a 4 por volatilidad)
 RISK_BY_CONFLUENCES = {
-    7: 1.00,                       # 7/7 confluencias (MACD+sentiment) -> 1.00% (excepcional)
-    6: 1.00,                       # 6 confluencias -> 1.00% (confianza excepcional)
-    5: 0.75,                       # 5 confluencias -> 0.75% (confianza maxima)
-    4: 0.50,                       # 4 confluencias -> 0.50% (confianza alta)
-    3: 0.25,                       # 3 confluencias -> 0.25% (confianza moderada)
+    7: 0.75,                       # 7/7 confluencias -> 0.75% (max en mercado volatil)
+    6: 0.60,                       # 6 confluencias -> 0.60% (confianza excepcional)
+    5: 0.50,                       # 5 confluencias -> 0.50% (confianza maxima)
+    4: 0.30,                       # 4 confluencias -> 0.30% (confianza alta)
+    3: 0.15,                       # 3 confluencias -> 0.15% (no se usara con MIN=4)
 }
 # Nota: La tendencia (EMA) siempre debe cumplirse. Con 3/5 se necesitan
 # tendencia + 2 de las otras 4 confluencias.
@@ -49,10 +49,10 @@ RISK_BY_CONFLUENCES = {
 # ============================================
 # BREAK EVEN Y TRAILING STOP
 # ============================================
-BREAK_EVEN_PIPS = 15             # Mover SL a entrada cuando el precio llegue a +15 pips
+BREAK_EVEN_PIPS = 25             # Mover SL a entrada a +25 pips (aumentado por volatilidad alta)
 BREAK_EVEN_SPREAD_BUFFER = True  # Agregar spread al break even para evitar cierre prematuro
-TRAILING_ACTIVATE_PIPS = 40      # Activar trailing stop a +40 pips
-TRAILING_STEP_PIPS = 15          # Trailing de 15 pips
+TRAILING_ACTIVATE_PIPS = 55      # Activar trailing stop a +55 pips (mas espacio por ATR alto)
+TRAILING_STEP_PIPS = 20          # Trailing de 20 pips (mas holgura por swings amplios)
 
 # ============================================
 # INDICADORES
@@ -60,26 +60,26 @@ TRAILING_STEP_PIPS = 15          # Trailing de 15 pips
 EMA_FAST = 21                    # EMA rápida
 EMA_SLOW = 50                    # EMA lenta
 RSI_PERIOD = 14                  # Período RSI
-RSI_LOWER = 35                   # RSI mínimo para entrada (ampliado de 40 a 35)
-RSI_UPPER = 65                   # RSI máximo para entrada (ampliado de 60 a 65)
+RSI_LOWER = 30                   # RSI mínimo para entrada (ampliado a 30 - capturar oversold bounces)
+RSI_UPPER = 70                   # RSI máximo para entrada (ampliado a 70 - permitir movimientos trending)
 
 # ============================================
 # EMA 200 - FILTRO DE TENDENCIA DE LARGO PLAZO
 # ============================================
-EMA_200_ENABLED = False              # Activar filtro EMA 200
+EMA_200_ENABLED = True               # ACTIVADO - precio ($4900) muy encima de EMA200 (~$4200), confirma uptrend
 EMA_200_PERIOD = 200                 # Periodo de la EMA de largo plazo
 
 # ============================================
 # ADX - FILTRO DE FUERZA DE TENDENCIA
 # ============================================
-ADX_ENABLED = False                  # Activar filtro ADX
+ADX_ENABLED = True                   # ACTIVADO - ADX actual en 35.98, mercado trending
 ADX_PERIOD = 14                      # Periodo del ADX
-ADX_MIN_THRESHOLD = 25               # Minimo ADX para permitir operaciones
+ADX_MIN_THRESHOLD = 20               # Reducido a 20 para capturar tendencias mas temprano
 
 # ============================================
 # MACD - CONFLUENCIA DE MOMENTUM (6ta confluencia)
 # ============================================
-MACD_ENABLED = False                 # Activar MACD como confluencia adicional
+MACD_ENABLED = True                  # ACTIVADO - 6ta confluencia de momentum
 MACD_FAST = 12                       # Periodo rapido MACD
 MACD_SLOW = 26                       # Periodo lento MACD
 MACD_SIGNAL = 9                      # Periodo de la linea de senal
@@ -88,22 +88,22 @@ MACD_SIGNAL = 9                      # Periodo de la linea de senal
 # ATR DINÁMICO PARA SL/TP
 # ============================================
 ATR_PERIOD = 14                  # Período ATR
-ATR_SL_MULTIPLIER = 1.5          # SL = ATR * 1.5
-ATR_TP_MULTIPLIER = 4.5          # TP = ATR * 4.5 (ratio 1:3)
+ATR_SL_MULTIPLIER = 2.0          # SL = ATR * 2.0 (ampliado por alta volatilidad H1 ~$7-8)
+ATR_TP_MULTIPLIER = 5.0          # TP = ATR * 5.0 (ratio 1:2.5 - mas conservador)
 USE_DYNAMIC_SL_TP = True         # Usar ATR dinámico en lugar de pips fijos
 ATR_VOLATILITY_FILTER = True     # Filtrar mercados demasiado volátiles
-ATR_MAX_MULTIPLIER = 2.0         # No operar si ATR actual > ATR_SMA(50) * este factor
+ATR_MAX_MULTIPLIER = 2.5         # Subido a 2.5 (volatilidad ya es alta, evitar rechazar todo)
 
 # ============================================
 # SMART MONEY - LIQUIDITY SWEEP
 # ============================================
-LIQUIDITY_LOOKBACK = 10          # Velas hacia atrás para buscar niveles de liquidez
-PULLBACK_LOOKBACK = 5            # Velas máximas para confirmar pullback
+LIQUIDITY_LOOKBACK = 15          # Velas hacia atras (aumentado para capturar mas estructura)
+PULLBACK_LOOKBACK = 7            # Velas maximas para confirmar pullback (ampliado por swings largos)
 
 # ============================================
 # MULTI-TIMEFRAME - CONFIRMACION H4
 # ============================================
-MTF_ENABLED = False                  # Activar confirmacion multi-timeframe
+MTF_ENABLED = True                   # ACTIVADO - H4 y H1 ambos bajistas, alineacion confirmada
 MTF_TIMEFRAME = "H4"                # Timeframe superior para confirmacion
 MTF_EMA_FAST = 21                   # EMA rapida en timeframe superior
 MTF_EMA_SLOW = 50                   # EMA lenta en timeframe superior
@@ -111,9 +111,9 @@ MTF_EMA_SLOW = 50                   # EMA lenta en timeframe superior
 # ============================================
 # FILTROS DE SESIÓN (UTC)
 # ============================================
-SESSION_START_HOUR = 0           # Inicio sesión Londres (UTC)
-SESSION_END_HOUR = 17            # Fin sesión New York (UTC)
-NEWS_BUFFER_MINUTES = 30         # Minutos antes/después de noticias para no operar
+SESSION_START_HOUR = 7           # Inicio sesion Londres (UTC) - evitar Asia con baja liquidez
+SESSION_END_HOUR = 17            # Fin sesion New York (UTC)
+NEWS_BUFFER_MINUTES = 45         # Minutos antes/despues de noticias (ampliado por FOMC/PCE esta semana)
 
 # ============================================
 # NOTIFICACIONES TELEGRAM (Opcional)
@@ -157,7 +157,7 @@ SENTIMENT_ADJUST_ATR = True          # Ajustar multiplicadores ATR segun sentimi
 SENTIMENT_ADJUST_MIN_CONF = True     # Ajustar confluencias minimas segun sentimiento
 
 # Rangos de ajuste por sentimiento
-SENTIMENT_RSI_NARROW = (40, 60)      # RSI bounds cuando sentimiento es incierto/mixto
-SENTIMENT_RSI_WIDE = (30, 70)        # RSI bounds cuando sentimiento es fuerte y alineado
-SENTIMENT_ATR_SL_VOLATILE = 2.0      # SL multiplier cuando sentimiento es muy volatil
-SENTIMENT_MIN_CONF_MIXED = 4         # Min confluencias cuando sentimiento es mixto
+SENTIMENT_RSI_NARROW = (35, 65)      # RSI bounds cuando sentimiento es incierto/mixto
+SENTIMENT_RSI_WIDE = (25, 75)        # RSI bounds cuando sentimiento es fuerte y alineado
+SENTIMENT_ATR_SL_VOLATILE = 2.5      # SL multiplier cuando sentimiento es muy volatil (mercado actual)
+SENTIMENT_MIN_CONF_MIXED = 5         # Min confluencias cuando sentimiento es mixto (mas estricto)
